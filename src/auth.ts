@@ -25,7 +25,7 @@ export async function requireApiAuth(): Promise<AuthResult> {
       return { ok: false, reason: "unauthorized" };
     }
     if (!res.ok) {
-      return { ok: true, offline: true };
+      return { ok: false, reason: "unauthorized" };
     }
     const user = (await res.json()) as { id?: string };
     return { ok: true, userId: user.id };
