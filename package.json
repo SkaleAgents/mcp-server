@@ -1,7 +1,10 @@
 {
   "name": "@skaleagents/swarm",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "description": "SkaleAgents MCP server — stdio tools against the Laravel api",
   "bin": {
