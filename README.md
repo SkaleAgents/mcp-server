@@ -10,9 +10,9 @@ Tools: `review_architecture`, `scan_iac_stub`.
 2. **Bearer token** — mint one in the web app: sign in → **API tokens** → Create token.  
    Or for local-only testing:
    ```bash
-   curl -s -X POST http://localhost:8082/api/auth/grok/callback \
-     -H 'Content-Type: application/json' \
-     -d '{"code":"mcp","displayName":"MCP User"}' | jq -r .token
+    curl -s -X POST http://localhost:8082/api/auth/google/callback \
+      -H 'Content-Type: application/json' \
+      -d '{"code":"mcp","displayName":"MCP User","email":"mcp@example.com"}' | jq -r .token
    ```
 
 ## Local development
@@ -99,6 +99,6 @@ Same env vars; point `command`/`args` at `node …/dist/index.js` or `npx @skale
 ## Auth behavior
 
 - Missing/invalid token → tools return an **unauthorized** error (fail closed).
-- Token is user-scoped; bot visibility follows platform-api RBAC.
+- Token is user-scoped; bot visibility follows `api` RBAC.
 
 Hub contract: [docs/contracts/mcp/tools.md](https://github.com/SkaleAgents/workspace/blob/main/docs/contracts/mcp/tools.md)
