@@ -42,9 +42,7 @@ server.registerTool(
         : "general";
 
     const output = {
-      summary: auth.offline
-        ? "Phase 1 stub architecture review (offline / API unreachable)"
-        : "Phase 1 stub architecture review from @skaleagents/swarm",
+      summary: "Phase 1 stub architecture review from @skaleagents/swarm",
       findings: cannedFindings(content, focusValue),
       botHints,
     };
