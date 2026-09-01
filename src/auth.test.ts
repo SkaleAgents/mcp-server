@@ -42,12 +42,12 @@ describe("requireApiAuth", () => {
     assert.deepEqual(result, { ok: true, userId: "user-1" });
   });
 
-  it("allows offline when fetch throws", async () => {
+  it("rejects when the API is unavailable", async () => {
     process.env.SKALEAGENTS_API_TOKEN = "any";
     globalThis.fetch = async () => {
       throw new Error("network down");
     };
     const result = await requireApiAuth();
-    assert.deepEqual(result, { ok: true, offline: true });
+    assert.deepEqual(result, { ok: false, reason: "api_unavailable" });
   });
 });
