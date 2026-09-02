@@ -8,7 +8,7 @@
   "type": "module",
   "description": "SkaleAgents MCP server — stdio tools against the Laravel api",
   "bin": {
-    "skaleagents-swarm": "./dist/index.js"
+    "skaleagents-swarm": "dist/index.js"
   },
   "files": [
     "dist"
