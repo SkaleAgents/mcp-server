@@ -1,13 +1,18 @@
 # @skaleagents/swarm
 
-Public stdio MCP server for SkaleAgents Phase 1. Talks to the Laravel **api** (JSON only — no web UI) with a Sanctum bearer token.
+Public stdio MCP server for SkaleAgents Phase 1. Talks to the Laravel **api**
+(JSON only, no web UI) with a Sanctum bearer token.
 
 Tools: `review_architecture`, `scan_iac_stub`.
 
+`review_architecture` accepts application source or infrastructure text. Your AI
+client reads the files in its workspace and sends the relevant content through
+the MCP tool for a structured review.
+
 ## Prerequisites
 
-1. **API running** — Sail on `http://localhost:8082` (or your hosted API URL later).
-2. **Bearer token** — mint one in the web app: sign in → **API tokens** → Create token.  
+1. **API running:** Sail on `http://localhost:8082` (or your hosted API URL later).
+2. **Bearer token:** mint one in the web app: sign in → **MCP** → Create token.
    Or for local-only testing:
    ```bash
     curl -s -X POST http://localhost:8082/api/auth/google/callback \
@@ -32,7 +37,7 @@ npm run smoke   # needs API on :8082
 
 Add to `.cursor/mcp.json` (project) or Cursor Settings → MCP:
 
-### Option A — local clone (recommended while API is local)
+### Option A: local clone (recommended while API is local)
 
 ```json
 {
@@ -66,7 +71,7 @@ Dev without build:
 }
 ```
 
-### Option B — after npm publish (hosted API)
+### Option B: after npm publish (hosted API)
 
 ```json
 {
@@ -93,7 +98,7 @@ Same env vars; point `command`/`args` at `node …/dist/index.js` or `npx @skale
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `SKALEAGENTS_API_TOKEN` | Yes | Sanctum bearer token (from web **API tokens** page) |
+| `SKALEAGENTS_API_TOKEN` | Yes | Sanctum bearer token (from the web **MCP** page) |
 | `PLATFORM_API_URL` | No | Default `http://localhost:8082` |
 
 ## Auth behavior
