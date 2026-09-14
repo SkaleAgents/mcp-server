@@ -4,14 +4,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { requireApiAuth, unauthorizedContent } from "./auth.js";
 import {
-  cannedFindings,
+  architectureFindings,
   countIacResources,
   fetchPublicBotHints,
 } from "./review.js";
 
 const server = new McpServer({
   name: "skaleagents-swarm",
-  version: "0.1.0",
+  version: "0.2.0",
 });
 
 server.registerTool(
@@ -19,31 +19,38 @@ server.registerTool(
   {
     title: "Review architecture",
     description:
-      "Request a high-level architecture / security review of a code or IaC snippet.",
+      "Review application source or infrastructure text for security, reliability, and cost risks.",
     inputSchema: {
-      content: z.string().describe("Source or IaC text to review"),
-      focus: z
+      content: z
         .string()
+        .min(1)
+        .max(500_000)
+        .describe("Application source or IaC text to review"),
+      focus: z
+        .enum(["security", "reliability", "cost", "general"])
         .optional()
+        .default("general")
         .describe("Review focus: security, reliability, cost, general"),
+      format: z
+        .enum(["terraform", "cloudformation", "kubernetes", "application", "auto"])
+        .optional()
+        .default("auto")
+        .describe(
+          "Content format: terraform, cloudformation, kubernetes, application, auto",
+        ),
     },
   },
-  async ({ content, focus }) => {
+  async ({ content, focus, format }) => {
     const auth = await requireApiAuth();
     if (!auth.ok) return unauthorizedContent(auth);
 
     const botHints = await fetchPublicBotHints();
-    const focusValue =
-      focus === "security" ||
-      focus === "reliability" ||
-      focus === "cost" ||
-      focus === "general"
-        ? focus
-        : "general";
+    const focusValue = focus ?? "general";
+    const formatValue = format ?? "auto";
 
     const output = {
-      summary: "Phase 1 stub architecture review from @skaleagents/swarm",
-      findings: cannedFindings(content, focusValue),
+      summary: `Structured architecture review from @skaleagents/swarm (focus=${focusValue}, format=${formatValue})`,
+      findings: architectureFindings(content, focusValue),
       botHints,
     };
 
@@ -61,6 +68,8 @@ server.registerTool(
     inputSchema: {
       content: z
         .string()
+        .min(1)
+        .max(500_000)
         .describe("Terraform / CloudFormation / Kubernetes YAML"),
       format: z
         .string()
