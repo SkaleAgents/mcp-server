@@ -107,7 +107,7 @@ export function architectureFindings(content: string, focus: string): Finding[] 
   }
   if (
     shouldInclude(focusValue, "security") &&
-    /(?:public-read|publicRead|allUsers|0\.0\.0\.0\/0)/i.test(content)
+    /(?:public-read|publicRead|allUsers)/i.test(content)
   ) {
     findings.push({
       severity: "high",
