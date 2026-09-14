@@ -128,25 +128,33 @@ async function main() {
           content:
             'resource "aws_security_group" "x" { cidr_blocks = ["0.0.0.0/0"] }',
           focus: "security",
+          format: "terraform",
         },
       },
     });
 
     const toolCall = await waitForResponse(3);
+    const reviewText = toolCall?.result?.content?.[0]?.text ?? "";
+    const review = JSON.parse(reviewText);
 
     console.log(
       JSON.stringify(
         {
-          initializeOk: Boolean(responses.find((r) => r.id === 1)),
-          tools: toolList?.result?.tools?.map((t) => t.name),
-          reviewPreview: toolCall?.result?.content?.[0]?.text?.slice(0, 240),
-        },
+           initializeOk: Boolean(responses.find((r) => r.id === 1)),
+           tools: toolList?.result?.tools?.map((t) => t.name),
+           reviewPreview: reviewText.slice(0, 240),
+           findingTitles: review.findings?.map((finding) => finding.title),
+         },
         null,
         2,
       ),
     );
 
-    if (!toolList?.result?.tools?.length || !toolCall?.result) {
+    if (
+      !toolList?.result?.tools?.length ||
+      !toolCall?.result ||
+      !review.findings?.some((finding) => finding.title === "Broad network exposure")
+    ) {
       throw new Error("MCP smoke response was incomplete");
     }
   } finally {

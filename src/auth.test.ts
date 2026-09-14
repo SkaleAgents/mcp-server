@@ -50,4 +50,11 @@ describe("requireApiAuth", () => {
     const result = await requireApiAuth();
     assert.deepEqual(result, { ok: false, reason: "api_unavailable" });
   });
+
+  it("does not call an unhealthy API an auth failure", async () => {
+    process.env.SKALEAGENTS_API_TOKEN = "any";
+    globalThis.fetch = async () => new Response("upstream failed", { status: 503 });
+    const result = await requireApiAuth();
+    assert.deepEqual(result, { ok: false, reason: "api_unavailable" });
+  });
 });
