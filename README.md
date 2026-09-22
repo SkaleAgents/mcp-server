@@ -1,7 +1,7 @@
 # @skaleagents/swarm
 
 Public stdio MCP server for SkaleAgents Phase 1. Talks to the Laravel **api**
-(JSON only, no web UI) with a Sanctum bearer token.
+over JSON and uses browser OAuth for sign-in.
 
 Tools: `review_architecture`, `scan_iac_stub`.
 
@@ -12,13 +12,12 @@ the MCP tool for a structured review.
 ## Prerequisites
 
 1. **API running:** Sail on `http://localhost:8082` (or your hosted API URL later).
-2. **Bearer token:** mint one in the web app: sign in → **MCP** → Create token.
-   Or for local-only testing:
-   ```bash
-    curl -s -X POST http://localhost:8082/api/auth/google/callback \
-      -H 'Content-Type: application/json' \
-      -d '{"code":"mcp","displayName":"MCP User","email":"mcp@example.com"}' | jq -r .token
-   ```
+2. A browser that can open the SkaleAgents sign-in page.
+
+The first tool call opens browser sign-in. Approve MCP access there and return
+to your AI client. The package stores the OAuth refresh credential locally and
+refreshes access automatically. You do not need to create or paste an API key.
+Active connections can be revoked from the web app's MCP settings page.
 
 ## Local development
 
@@ -27,7 +26,6 @@ git clone https://github.com/SkaleAgents/mcp-server.git
 cd mcp-server
 npm install
 cp .env.example .env
-# Set SKALEAGENTS_API_TOKEN=<token from web app or curl above>
 npm run build
 npm test
 npm run smoke   # needs API on :8082
@@ -46,7 +44,6 @@ Add to `.cursor/mcp.json` (project) or Cursor Settings → MCP:
       "command": "node",
       "args": ["/absolute/path/to/mcp-server/dist/index.js"],
       "env": {
-        "SKALEAGENTS_API_TOKEN": "<paste token from web app → API tokens>",
         "PLATFORM_API_URL": "http://localhost:8082"
       }
     }
@@ -63,7 +60,6 @@ Dev without build:
       "command": "npx",
       "args": ["tsx", "/absolute/path/to/mcp-server/src/index.ts"],
       "env": {
-        "SKALEAGENTS_API_TOKEN": "<token>",
         "PLATFORM_API_URL": "http://localhost:8082"
       }
     }
@@ -80,7 +76,6 @@ Dev without build:
       "command": "npx",
       "args": ["-y", "@skaleagents/swarm"],
       "env": {
-        "SKALEAGENTS_API_TOKEN": "<token>",
         "PLATFORM_API_URL": "https://api.skaleagents.com"
       }
     }
@@ -92,18 +87,22 @@ Restart Cursor after saving. In Agent/Chat, tools should appear as `review_archi
 
 ## Claude Code
 
-Same env vars; point `command`/`args` at `node …/dist/index.js` or `npx @skaleagents/swarm` once published.
+Point `command`/`args` at `node .../dist/index.js` or `npx @skaleagents/swarm` once published. OAuth starts on the first tool call.
 
 ## Environment
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `SKALEAGENTS_API_TOKEN` | Yes | Sanctum bearer token (from the web **MCP** page) |
+| `SKALEAGENTS_API_TOKEN` | No | Legacy Sanctum bearer-token override. OAuth is used when empty. |
 | `PLATFORM_API_URL` | No | Default `http://localhost:8082` |
+| `SKALEAGENTS_OAUTH_CACHE` | No | OAuth cache path. Default `~/.config/skaleagents/oauth.json`. |
+| `SKALEAGENTS_OAUTH_ENABLED` | No | Set to `false` only to disable browser OAuth. |
 
 ## Auth behavior
 
-- Missing/invalid token → tools return an **unauthorized** error (fail closed).
-- Token is user-scoped; bot visibility follows `api` RBAC.
+- Missing bearer override → browser OAuth starts automatically.
+- OAuth access and refresh credentials are stored with local-user-only file permissions.
+- A rejected or revoked connection returns an auth error and does not run a tool.
+- The connection is user-scoped; bot visibility follows `api` RBAC.
 
 Hub contract: [docs/contracts/mcp/tools.md](https://github.com/SkaleAgents/workspace/blob/main/docs/contracts/mcp/tools.md)

@@ -2,7 +2,11 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { requireApiAuth, unauthorizedContent } from "./auth.js";
+import {
+  getApiAccessToken,
+  requireApiAuth,
+  unauthorizedContent,
+} from "./auth.js";
 import {
   architectureFindings,
   countIacResources,
@@ -11,7 +15,7 @@ import {
 
 const server = new McpServer({
   name: "skaleagents-swarm",
-  version: "0.2.2",
+  version: "0.3.0",
 });
 
 server.registerTool(
@@ -44,7 +48,9 @@ server.registerTool(
     const auth = await requireApiAuth();
     if (!auth.ok) return unauthorizedContent(auth);
 
-    const botHints = await fetchPublicBotHints();
+    const token = await getApiAccessToken();
+    if (!token) return unauthorizedContent({ ok: false, reason: "oauth_failed" });
+    const botHints = await fetchPublicBotHints(token);
     const focusValue = focus ?? "general";
     const formatValue = format ?? "auto";
 
