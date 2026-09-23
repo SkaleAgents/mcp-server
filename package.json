@@ -1,12 +1,18 @@
 {
   "name": "@skaleagents/swarm",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": false,
   "publishConfig": {
     "access": "public"
   },
   "type": "module",
-  "description": "SkaleAgents MCP server — stdio tools against the Laravel api",
+  "description": "SkaleAgents review tools with OAuth for local and hosted MCP clients",
+  "exports": {
+    "./http": {
+      "types": "./dist/http.d.ts",
+      "import": "./dist/http.js"
+    }
+  },
   "bin": {
     "skaleagents-swarm": "dist/index.js"
   },

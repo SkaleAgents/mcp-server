@@ -1,0 +1,134 @@
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+import {
+  getApiAccessToken,
+  requireApiAuth,
+  unauthorizedContent,
+} from "./auth.js";
+import {
+  architectureFindings,
+  countIacResources,
+  fetchPublicBotHints,
+} from "./review.js";
+
+export function createServer(remote = false) {
+  const server = new McpServer({
+    name: "skaleagents-swarm",
+    version: "0.4.0",
+  });
+
+  server.registerTool(
+    "review_architecture",
+    {
+      title: "Review architecture",
+      description:
+        "Review application source or infrastructure text for security, reliability, and cost risks.",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }] },
+      inputSchema: {
+        content: z
+          .string()
+          .min(1)
+          .max(500_000)
+          .describe("Application source or IaC text to review"),
+        focus: z
+          .enum(["security", "reliability", "cost", "general"])
+          .optional()
+          .default("general")
+          .describe("Review focus: security, reliability, cost, general"),
+        format: z
+          .enum([
+            "terraform",
+            "cloudformation",
+            "kubernetes",
+            "application",
+            "auto",
+          ])
+          .optional()
+          .default("auto")
+          .describe(
+            "Content format: terraform, cloudformation, kubernetes, application, auto",
+          ),
+      },
+    },
+    async ({ content, focus, format }) => {
+      let token: string | undefined;
+      if (!remote) {
+        const auth = await requireApiAuth();
+        if (!auth.ok) return unauthorizedContent(auth);
+        token = (await getApiAccessToken()) ?? undefined;
+        if (!token)
+          return unauthorizedContent({ ok: false, reason: "oauth_failed" });
+      }
+      const botHints = await fetchPublicBotHints(token);
+      const focusValue = focus ?? "general";
+      const formatValue = format ?? "auto";
+
+      const output = {
+        summary: `Structured architecture review from @skaleagents/swarm (focus=${focusValue}, format=${formatValue})`,
+        findings: architectureFindings(content, focusValue),
+        botHints,
+      };
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(output, null, 2) }],
+      };
+    },
+  );
+
+  server.registerTool(
+    "scan_iac_stub",
+    {
+      title: "Scan IaC (stub)",
+      description: "Stub seam for Phase 2 DevSecOps IaC scanning.",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }] },
+      inputSchema: {
+        content: z
+          .string()
+          .min(1)
+          .max(500_000)
+          .describe("Terraform / CloudFormation / Kubernetes YAML"),
+        format: z
+          .string()
+          .optional()
+          .describe("terraform, cloudformation, kubernetes, auto"),
+      },
+    },
+    async ({ content, format }) => {
+      if (!remote) {
+        const auth = await requireApiAuth();
+        if (!auth.ok) return unauthorizedContent(auth);
+      }
+
+      const formatValue =
+        format === "terraform" ||
+        format === "cloudformation" ||
+        format === "kubernetes" ||
+        format === "auto"
+          ? format
+          : "auto";
+
+      const output = {
+        status: "stub",
+        message: "Full IaC scanning lands in Phase 2 agent-swarm",
+        format: formatValue,
+        parsedResourceCount: countIacResources(content),
+      };
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(output, null, 2) }],
+      };
+    },
+  );
+
+  return server;
+}

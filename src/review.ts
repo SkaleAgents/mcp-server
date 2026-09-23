@@ -135,12 +135,13 @@ export function architectureFindings(content: string, focus: string): Finding[] 
   return findings;
 }
 
-export async function fetchPublicBotHints(token: string): Promise<string[]> {
+export async function fetchPublicBotHints(token?: string): Promise<string[]> {
   try {
     const res = await fetch(`${getApiUrl()}/api/bots`, {
+      signal: AbortSignal.timeout(10_000),
       headers: {
         Accept: "application/json",
-        Authorization: `Bearer ${token}`,
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
     });
     if (!res.ok) return [];

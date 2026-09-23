@@ -1,7 +1,7 @@
 # @skaleagents/swarm
 
-Public stdio MCP server for SkaleAgents Phase 1. Talks to the Laravel **api**
-over JSON and uses browser OAuth for sign-in.
+SkaleAgents MCP server with local stdio and hosted Streamable HTTP transports.
+Uses browser OAuth for sign-in.
 
 Tools: `review_architecture`, `scan_iac_stub`.
 
@@ -9,7 +9,24 @@ Tools: `review_architecture`, `scan_iac_stub`.
 client reads the files in its workspace and sends the relevant content through
 the MCP tool for a structured review.
 
-## Prerequisites
+## Hosted connection
+
+Use `https://skaleagents.com/mcp` in Claude Desktop or ChatGPT's custom connector
+settings. Choose OAuth and leave client ID and secret fields blank. The client
+registers itself, opens Google sign-in, and asks you to approve MCP access.
+See [client setup](https://skaleagents.com/settings) for Cursor, Claude Code,
+Claude Desktop, ChatGPT, and Codex instructions.
+
+The web app hosts this endpoint using `handleMcpRequest` from
+`@skaleagents/swarm/http`. It validates each bearer credential with the API's
+`/api/oauth/mcp-token` endpoint before running a tool. Tokens are bound to the
+MCP resource and cannot access unrelated API routes. Credentials are not
+forwarded to the public bot directory.
+
+`protectedResourceMetadata` exports the discovery response for
+`/.well-known/oauth-protected-resource/mcp`.
+
+## Local stdio prerequisites
 
 1. Node.js 20 or newer. The client connects to `https://api.skaleagents.com` by default.
 2. A browser that can open the SkaleAgents sign-in page.
@@ -74,7 +91,7 @@ Dev without build:
   "mcpServers": {
     "skaleagents": {
       "command": "npx",
-      "args": ["-y", "@skaleagents/swarm@0.3.1"]
+      "args": ["-y", "@skaleagents/swarm@0.4.0"]
     }
   }
 }
@@ -94,6 +111,7 @@ Use the published package configuration above in `.mcp.json`. OAuth starts on th
 | `PLATFORM_API_URL` | No | Defaults to `https://api.skaleagents.com`. Override only for local development or another API deployment. Empty values use the default. |
 | `SKALEAGENTS_OAUTH_CACHE` | No | OAuth cache path. Default `~/.config/skaleagents/oauth.json`. |
 | `SKALEAGENTS_OAUTH_ENABLED` | No | Set to `false` only to disable browser OAuth. |
+| `MCP_RESOURCE_URL` | No | Hosted transport audience. Defaults to `https://skaleagents.com/mcp`; must match the API OAuth configuration. |
 
 ## Auth behavior
 
