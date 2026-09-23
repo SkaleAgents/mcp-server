@@ -11,7 +11,7 @@ the MCP tool for a structured review.
 
 ## Prerequisites
 
-1. **API running:** Sail on `http://localhost:8082` (or your hosted API URL later).
+1. Node.js 20 or newer. The client connects to `https://api.skaleagents.com` by default.
 2. A browser that can open the SkaleAgents sign-in page.
 
 The first tool call opens browser sign-in. Approve MCP access there and return
@@ -67,17 +67,14 @@ Dev without build:
 }
 ```
 
-### Option B: after npm publish (hosted API)
+### Option B: published package (hosted API)
 
 ```json
 {
   "mcpServers": {
     "skaleagents": {
       "command": "npx",
-      "args": ["-y", "@skaleagents/swarm"],
-      "env": {
-        "PLATFORM_API_URL": "https://api.skaleagents.com"
-      }
+      "args": ["-y", "@skaleagents/swarm@0.3.1"]
     }
   }
 }
@@ -87,14 +84,14 @@ Restart Cursor after saving. In Agent/Chat, tools should appear as `review_archi
 
 ## Claude Code
 
-Point `command`/`args` at `node .../dist/index.js` or `npx @skaleagents/swarm` once published. OAuth starts on the first tool call.
+Use the published package configuration above in `.mcp.json`. OAuth starts on the first tool call. No API URL or keys are needed.
 
 ## Environment
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `SKALEAGENTS_API_TOKEN` | No | Legacy Sanctum bearer-token override. OAuth is used when empty. |
-| `PLATFORM_API_URL` | No | Default `http://localhost:8082` |
+| `PLATFORM_API_URL` | No | Defaults to `https://api.skaleagents.com`. Override only for local development or another API deployment. Empty values use the default. |
 | `SKALEAGENTS_OAUTH_CACHE` | No | OAuth cache path. Default `~/.config/skaleagents/oauth.json`. |
 | `SKALEAGENTS_OAUTH_ENABLED` | No | Set to `false` only to disable browser OAuth. |
 

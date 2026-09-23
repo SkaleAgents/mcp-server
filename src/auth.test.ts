@@ -34,22 +34,31 @@ describe("requireApiAuth", () => {
   it("rejects invalid token when API returns 401", async () => {
     process.env.SKALEAGENTS_API_TOKEN = "bad";
     process.env.PLATFORM_API_URL = "http://localhost:8082";
-    globalThis.fetch = async () =>
-      new Response(JSON.stringify({ message: "Unauthenticated." }), {
+    globalThis.fetch = async (url) => {
+      assert.equal(String(url), "http://localhost:8082/api/user");
+      return new Response(JSON.stringify({ message: "Unauthenticated." }), {
         status: 401,
       });
+    };
     const result = await requireApiAuth();
     assert.deepEqual(result, { ok: false, reason: "unauthorized" });
   });
 
-  it("accepts valid token", async () => {
+  it("uses the production API without a URL override or with a blank override", async () => {
     process.env.SKALEAGENTS_API_TOKEN = "good";
-    globalThis.fetch = async () =>
-      new Response(JSON.stringify({ id: "user-1", displayName: "Rayhan" }), {
+    const calls: string[] = [];
+    globalThis.fetch = async (url) => {
+      calls.push(String(url));
+      return new Response(JSON.stringify({ id: "user-1", displayName: "Rayhan" }), {
         status: 200,
       });
-    const result = await requireApiAuth();
-    assert.deepEqual(result, { ok: true, userId: "user-1" });
+    };
+    for (const override of [undefined, "", "  "]) {
+      if (override === undefined) delete process.env.PLATFORM_API_URL;
+      else process.env.PLATFORM_API_URL = override;
+      assert.deepEqual(await requireApiAuth(), { ok: true, userId: "user-1" });
+    }
+    assert.deepEqual(calls, Array(3).fill("https://api.skaleagents.com/api/user"));
   });
 
   it("rejects when the API is unavailable", async () => {

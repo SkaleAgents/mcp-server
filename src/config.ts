@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 export function getApiUrl(): string {
   return (
-    process.env.PLATFORM_API_URL?.replace(/\/$/, "") ?? "http://localhost:8082"
+    process.env.PLATFORM_API_URL?.trim().replace(/\/+$/, "") || "https://api.skaleagents.com"
   );
 }
 
