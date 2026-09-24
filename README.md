@@ -3,12 +3,61 @@
 SkaleAgents MCP server with local stdio and hosted Streamable HTTP transports.
 Uses browser OAuth for sign-in.
 
-Tools: `review_architecture`, `scan_iac`. The older `scan_iac_stub` name remains
-an alias for the full scanner.
+Tools: `plan_architecture_review`, `review_application_architecture`,
+`review_architecture`, and `scan_iac`. The older `scan_iac_stub` name remains
+an alias for the IaC scanner.
 
 `review_architecture` accepts application source or infrastructure text. Your AI
 client reads the files in its workspace and sends the relevant content through
 the MCP tool for a structured review.
+
+## Whole-application consultation
+
+Ask your connected assistant:
+
+> Use SkaleAgents as an independent consultant to review this application's
+> architecture. Read the relevant files, ask me about the important design
+> decisions, and explain what is sound, what needs changes, and what needs
+> more evidence.
+
+The `architecture_consultation` MCP prompt provides this workflow for clients
+that support prompts. The tools work directly in chat too:
+
+1. `plan_architecture_review` takes a repository-relative `filePaths` inventory
+   and optional `context`. It suggests files to read and asks up to three
+   questions at a time.
+2. The assistant reads related files through its own workspace tools and calls
+   `review_application_architecture` with `files: [{ path, content }]` and the
+   context collected so far.
+3. Answer the follow-up questions. The assistant resubmits the relevant files
+   and updated context, then uses the evidence to review the design and compare
+   alternatives.
+
+The review covers product fit, routing/rendering, module boundaries, data
+access, authorization, reliability, testing/delivery, and deployment/cost.
+JavaScript/TypeScript source is parsed into an import graph. Next.js checks
+include transitive client imports, private environment access, async Client
+Components, metadata exports, error boundaries, Server Action modules, and
+explicit Edge runtime incompatibilities. Type-only imports and Server Action
+boundaries are respected.
+
+Context fields are `purpose`, `criticalFlows`, `accessControl`, `data`,
+`rendering`, `deployment`, `reliability`, `testing`, and `constraints`. Each
+holds the owner's answer as text. Calls are stateless: carry answers forward
+instead of relying on a server-side conversation ID.
+
+Submit up to 80 files, at most 150,000 characters per file and 500,000 combined.
+Use paths relative to one application package root, including `package.json`
+and `tsconfig.json` or `jsconfig.json`. Missing imports become evidence requests,
+not invented findings. The intake accepts up to 3,000 file paths.
+
+Results include an architecture map, referenced findings, an assessment agenda
+for every review area, and the next questions. The MCP provides static evidence
+and the connected assistant's model reasons through the architecture. No
+separate hosted model is invoked, and the tools do not clone repositories or
+run submitted code. A clean static check is not a whole-system correctness
+verdict. The [settings page](https://skaleagents.com/settings) has an interactive
+review-brief builder.
 
 ## Infrastructure scanning
 
@@ -133,13 +182,14 @@ Dev without build:
   "mcpServers": {
     "skaleagents": {
       "command": "npx",
-       "args": ["-y", "@skaleagents/swarm@0.5.0"]
+       "args": ["-y", "@skaleagents/swarm@0.6.0"]
     }
   }
 }
 ```
 
-Restart Cursor after saving. In Agent/Chat, tools should appear as `review_architecture`, `scan_iac`, and the compatibility alias `scan_iac_stub`.
+Reconnect after upgrading to refresh the tool catalog. The consultation tools,
+snippet review, IaC scanner, and compatibility alias should all appear.
 
 ## Claude Code
 

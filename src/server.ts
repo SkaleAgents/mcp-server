@@ -8,6 +8,8 @@ import {
 import { architectureFindings, fetchPublicBotHints } from "./review.js";
 import { looksLikeIac, ScanInputError } from "./iac/parse.js";
 import { filterFindings, scanIac, summarize } from "./iac/scan.js";
+import { registerConsultation } from "./application/tools.js";
+import { VERSION } from "./version.js";
 
 const contentSchema = z
   .string()
@@ -57,17 +59,21 @@ function inputError(error: unknown) {
 }
 
 export function createServer(remote = false) {
-  const server = new McpServer({
-    name: "skaleagents-swarm",
-    version: "0.5.0",
-  });
+  const server = new McpServer(
+    { name: "skaleagents-swarm", version: VERSION },
+    {
+      instructions:
+        "For a whole application architecture consultation, start with plan_architecture_review, read relevant files with the client's workspace tools, then call review_application_architecture. Ask its follow-up questions and carry answers forward in context. Use review_architecture for individual source snippets and scan_iac for infrastructure. Ground conclusions in the returned evidence and coverage limits.",
+    },
+  );
+  registerConsultation(server, remote);
 
   server.registerTool(
     "review_architecture",
     {
       title: "Review architecture",
       description:
-        "Review application source or parsed infrastructure for security, reliability, and cost risks. Returns located findings, rule IDs, remediation and coverage limits.",
+        "Review individual source snippets or parsed infrastructure for security, reliability, and cost risks. For a whole application or Next.js architecture consultation, use plan_architecture_review and review_application_architecture instead.",
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -120,7 +126,7 @@ export function createServer(remote = false) {
         );
         return result({
           status: "completed",
-          engineVersion: "0.5.0",
+          engineVersion: VERSION,
           format: "application",
           focus,
           summary: `Application review completed; ${findings.length} findings match the selected filters.`,

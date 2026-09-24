@@ -75,7 +75,13 @@ test("authenticated stateless clients initialize list and call shared review too
   const tools = await (await call("tools/list", {})).json();
   assert.deepEqual(
     tools.result.tools.map((tool: { name: string }) => tool.name).sort(),
-    ["review_architecture", "scan_iac", "scan_iac_stub"],
+    [
+      "plan_architecture_review",
+      "review_application_architecture",
+      "review_architecture",
+      "scan_iac",
+      "scan_iac_stub",
+    ],
   );
   calls = [];
   const review = await (
@@ -120,6 +126,101 @@ test("scanner and compatibility alias return parsed findings and structured cont
     assert.equal(output.parsedResourceCount, 1);
     assert.equal(output.findings[0].ruleId, "DB001");
     assert.deepEqual(output, JSON.parse(response.result.content[0].text));
+  }
+});
+
+test("whole-application consultation advances with context and exposes a reusable prompt", async () => {
+  const initial = await (
+    await call("tools/call", {
+      name: "plan_architecture_review",
+      arguments: { filePaths: ["package.json", "app/page.tsx"] },
+    })
+  ).json();
+  assert.equal(initial.result.structuredContent.nextQuestions[0].id, "purpose");
+  const reviewed = await (
+    await call("tools/call", {
+      name: "review_application_architecture",
+      arguments: {
+        files: [
+          {
+            path: "app/page.tsx",
+            content:
+              '"use client"; import fs from "node:fs"; export default function Page(){return <div/>}',
+          },
+        ],
+        context: {
+          purpose: "Customer portal",
+          criticalFlows: "Sign in and view projects",
+          accessControl: "API ownership checks",
+        },
+      },
+    })
+  ).json();
+  const report = reviewed.result.structuredContent;
+  assert.equal(report.verdict, "needs_changes");
+  assert.ok(
+    report.findings.some((f: { ruleId: string }) => f.ruleId === "NEXT001"),
+  );
+  assert.equal(report.nextQuestions[0].id, "data");
+  assert.deepEqual(report, JSON.parse(reviewed.result.content[0].text));
+  const unrelated = await (
+    await call("tools/call", {
+      name: "plan_architecture_review",
+      arguments: { filePaths: [] },
+    })
+  ).json();
+  assert.equal(
+    unrelated.result.structuredContent.nextQuestions[0].id,
+    "purpose",
+  );
+  const prompts = await (await call("prompts/list", {})).json();
+  assert.ok(
+    prompts.result.prompts.some(
+      (p: { name: string }) => p.name === "architecture_consultation",
+    ),
+  );
+  const prompt = await (
+    await call("prompts/get", {
+      name: "architecture_consultation",
+      arguments: { goal: "Review this Next.js app" },
+    })
+  ).json();
+  assert.match(
+    prompt.result.messages[0].content.text,
+    /review_application_architecture/,
+  );
+  assert.match(
+    prompt.result.messages[0].content.text,
+    /Review this Next\.js app/,
+  );
+});
+
+test("consultation validates batch limits and rejects unauthorized requests", async () => {
+  const files = Array.from({ length: 4 }, (_, i) => ({
+    path: `part${i}.ts`,
+    content: " ".repeat(130_000),
+  }));
+  const response = await (
+    await call("tools/call", {
+      name: "review_application_architecture",
+      arguments: { files },
+    })
+  ).json();
+  assert.equal(response.result.isError, true);
+  assert.match(response.result.content[0].text, /500,000/);
+  active = false;
+  try {
+    assert.equal(
+      (
+        await call("tools/call", {
+          name: "plan_architecture_review",
+          arguments: { filePaths: [] },
+        })
+      ).status,
+      401,
+    );
+  } finally {
+    active = true;
   }
 });
 

@@ -1,6 +1,7 @@
 import { parseIac, type IacFormat } from "./parse.js";
 import { resourceFindings } from "./rules.js";
 import type { Finding, FindingSeverity } from "../review.js";
+import { VERSION } from "../version.js";
 
 export const severityRank: Record<FindingSeverity, number> = {
   info: 0,
@@ -46,7 +47,7 @@ export function scanIac(content: string, options: ScanOptions = {}) {
   const limit = options.maxFindings ?? 100;
   return {
     status: "completed",
-    engineVersion: "0.5.0",
+    engineVersion: VERSION,
     format: parsed.format,
     focus: options.focus ?? "general",
     summary: `Scanned ${parsed.resources.length} resources; ${findings.length} findings match the selected filters.`,
