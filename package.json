@@ -1,6 +1,6 @@
 {
   "name": "@skaleagents/swarm",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": false,
   "publishConfig": {
     "access": "public"
@@ -24,7 +24,7 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "tsx --test src/*.test.ts src/iac/*.test.ts",
     "smoke": "tsx scripts/smoke-tools.mjs"
   },
   "engines": {
@@ -32,6 +32,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "hcl2-parser": "^1.0.3",
+    "yaml": "^2.9.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {

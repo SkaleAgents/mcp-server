@@ -3,11 +3,53 @@
 SkaleAgents MCP server with local stdio and hosted Streamable HTTP transports.
 Uses browser OAuth for sign-in.
 
-Tools: `review_architecture`, `scan_iac_stub`.
+Tools: `review_architecture`, `scan_iac`. The older `scan_iac_stub` name remains
+an alias for the full scanner.
 
 `review_architecture` accepts application source or infrastructure text. Your AI
 client reads the files in its workspace and sends the relevant content through
 the MCP tool for a structured review.
+
+## Infrastructure scanning
+
+`scan_iac` parses Terraform HCL/JSON, CloudFormation YAML/JSON, and Kubernetes
+manifests, including multi-document YAML and Kubernetes Lists. It returns a
+resource inventory and findings with stable rule IDs, severity, property paths,
+line locations, and remediation. Findings never include matched secret values.
+
+Checks cover public ingress, wildcard IAM, public storage, encryption settings,
+bucket versioning, RDS protection, EC2 metadata, Kubernetes privileges, images,
+resource requests, probes, replicas, inline Secrets, and RBAC. Literal credential
+and HTTP URL checks also run against parsed resource properties.
+
+Example tool arguments:
+
+```json
+{
+  "content": "resource \"aws_db_instance\" \"app\" { publicly_accessible = true }",
+  "format": "terraform",
+  "focus": "security",
+  "minSeverity": "medium",
+  "maxFindings": 100
+}
+```
+
+Both tools accept `focus` (`general`, `security`, `reliability`, or `cost`),
+`minSeverity` (`info` through `critical`), and `maxFindings` (1 to 500, default
+100). Content must contain 1 to 500,000 characters and cannot be whitespace.
+`format` defaults to `auto`; only `review_architecture` accepts `application`.
+
+Results are returned as JSON text and MCP `structuredContent`. `totalFindings`
+and `totals` cover all findings matching the filters; `truncated` signals that
+`maxFindings` limited the returned list. `rulesEvaluated` lists the IaC checks
+that ran. Malformed input returns a tool error, not a clean scan.
+
+IaC reviews use the same scanner through either tool. Application reviews use
+text patterns. Neither mode inspects live infrastructure. Terraform expressions,
+CloudFormation intrinsics, and external modules are not evaluated. HCL line
+locations point to resource declarations; property paths identify the setting.
+YAML aliases must be expanded before submission. Coverage limits are included
+in every result. An empty finding list is not proof that a system is secure.
 
 ## Hosted connection
 
@@ -91,13 +133,13 @@ Dev without build:
   "mcpServers": {
     "skaleagents": {
       "command": "npx",
-      "args": ["-y", "@skaleagents/swarm@0.4.0"]
+       "args": ["-y", "@skaleagents/swarm@0.5.0"]
     }
   }
 }
 ```
 
-Restart Cursor after saving. In Agent/Chat, tools should appear as `review_architecture` and `scan_iac_stub`.
+Restart Cursor after saving. In Agent/Chat, tools should appear as `review_architecture`, `scan_iac`, and the compatibility alias `scan_iac_stub`.
 
 ## Claude Code
 

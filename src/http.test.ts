@@ -73,7 +73,10 @@ test("authenticated stateless clients initialize list and call shared review too
     "skaleagents-swarm",
   );
   const tools = await (await call("tools/list", {})).json();
-  assert.equal(tools.result.tools.length, 2);
+  assert.deepEqual(
+    tools.result.tools.map((tool: { name: string }) => tool.name).sort(),
+    ["review_architecture", "scan_iac", "scan_iac_stub"],
+  );
   calls = [];
   const review = await (
     await call("tools/call", {
@@ -82,7 +85,12 @@ test("authenticated stateless clients initialize list and call shared review too
     })
   ).json();
   assert.equal(review.result.isError, undefined);
-  assert.ok(JSON.parse(review.result.content[0].text).findings.length > 1);
+  assert.ok(
+    JSON.parse(review.result.content[0].text).findings.some(
+      (finding: { title: string }) =>
+        finding.title === "Broad network exposure",
+    ),
+  );
   assert.equal(
     calls.find((c) => c.url.endsWith("/api/oauth/mcp-token"))?.authorization,
     "Bearer remote-test",
@@ -91,6 +99,44 @@ test("authenticated stateless clients initialize list and call shared review too
     calls.find((c) => c.url.endsWith("/api/bots"))?.authorization,
     null,
   );
+});
+
+test("scanner and compatibility alias return parsed findings and structured content", async () => {
+  for (const name of ["scan_iac", "scan_iac_stub", "review_architecture"]) {
+    const response = await (
+      await call("tools/call", {
+        name,
+        arguments: {
+          content:
+            'resource "aws_db_instance" "test" { publicly_accessible = true }',
+          format: "terraform",
+          focus: "security",
+        },
+      })
+    ).json();
+    assert.equal(response.result.isError, undefined);
+    const output = response.result.structuredContent;
+    assert.equal(output.status, "completed");
+    assert.equal(output.parsedResourceCount, 1);
+    assert.equal(output.findings[0].ruleId, "DB001");
+    assert.deepEqual(output, JSON.parse(response.result.content[0].text));
+  }
+});
+
+test("tool errors reject malformed IaC, whitespace, invalid filters and excessive content", async () => {
+  for (const arguments_ of [
+    { content: "resource {", format: "terraform" },
+    { content: "  \n" },
+    { content: "x", format: "xml" },
+    { content: "x", maxFindings: 0 },
+    { content: "x", minSeverity: "urgent" },
+    { content: "x".repeat(500_001) },
+  ]) {
+    const response = await (
+      await call("tools/call", { name: "scan_iac", arguments: arguments_ })
+    ).json();
+    assert.equal(response.result?.isError ?? !!response.error, true);
+  }
 });
 
 test("revoked credentials and wrong-audience credentials cannot call tools", async () => {
