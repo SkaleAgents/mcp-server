@@ -24,7 +24,8 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/*.test.ts src/iac/*.test.ts src/application/*.test.ts",
+    "test": "tsx --test src/*.test.ts src/iac/*.test.ts src/application/*.test.ts && npm run build && node --test scripts/*.test.mjs",
+    "benchmark:tool": "npm run build && node scripts/benchmark-tool-latency.mjs",
     "smoke": "tsx scripts/smoke-tools.mjs"
   },
   "engines": {
