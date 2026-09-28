@@ -205,6 +205,24 @@ Use the published package configuration above in `.mcp.json`. OAuth starts on th
 | `SKALEAGENTS_OAUTH_ENABLED` | No | Set to `false` only to disable browser OAuth. |
 | `MCP_RESOURCE_URL` | No | Hosted transport audience. Defaults to `https://skaleagents.com/mcp`; must match the API OAuth configuration. |
 
+## Steady-state tool latency probe
+
+With an existing, authorized `SKALEAGENTS_API_TOKEN` in the environment, run
+`npm run benchmark:tool`. The script builds this checkout, starts its stdio MCP
+server, makes five warmup calls, then times 50 `review_architecture` calls on a
+fixed synthetic application snippet. Set `BENCHMARK_WARMUP` from 0 to 20 and
+`BENCHMARK_SAMPLES` from 1 to 200 to change those counts. It refuses to start
+without the token and never opens an OAuth browser flow.
+
+Each timed call includes JSON-RPC transport, hosted API account validation,
+static review, and the API bot-hint lookup. Process startup, the MCP handshake,
+OAuth login or refresh, and a hosted MCP runtime are outside the timer. The
+output contains aggregate p50/p95/p99/max latency, the API origin, and counts;
+it omits the credential, account, and source text. A failed or unauthorized
+call aborts instead of being counted as a successful sample. This short,
+single-client diagnostic does not establish the platform's sub-second p95 or
+monthly availability target.
+
 ## Auth behavior
 
 - Missing bearer override → browser OAuth starts automatically.
