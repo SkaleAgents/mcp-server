@@ -55,6 +55,13 @@ test("times successful full MCP tool calls through API validation and bot lookup
   assert.equal(result.successCount, 3);
   assert.ok(result.p95Ms > 0);
   assert.ok(result.p95Ms <= result.maxMs);
+  assert.equal(result.fetchTimingBoundary, "request to response headers");
+  assert.equal(result.fetchTimings["/api/user"].sampleCount, 3);
+  assert.equal(result.fetchTimings["/api/bots"].sampleCount, 3);
+  assert.ok(result.fetchTimings["/api/user"].p95Ms > 0);
+  assert.ok(result.fetchTimings["/api/bots"].p95Ms > 0);
+  assert.equal(result.otherToolCallMs.sampleCount, 3);
+  assert.ok(result.otherToolCallMs.p95Ms >= 0);
   assert.deepEqual(api.calls, { user: 4, bots: 4 });
   assert.equal(result.apiOrigin, api.url);
   assert.doesNotMatch(JSON.stringify(result), /benchmark-test-token|test-account/);
