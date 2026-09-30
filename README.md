@@ -187,7 +187,7 @@ Dev without build:
   "mcpServers": {
     "skaleagents": {
       "command": "npx",
-       "args": ["-y", "@skaleagents/swarm@0.6.0"]
+       "args": ["-y", "@skaleagents/swarm@0.6.1"]
     }
   }
 }
