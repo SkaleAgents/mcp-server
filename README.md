@@ -127,6 +127,11 @@ to your AI client. The package stores the OAuth refresh credential locally and
 refreshes access automatically. You do not need to create or paste an API key.
 Active connections can be revoked from the web app's MCP settings page.
 
+Local `review_architecture` calls validate the account and fetch public bot
+hints concurrently. The public directory request carries no credential. Every
+review still requires successful account validation. An anonymous directory
+request may already be in flight when validation rejects a connection.
+
 ## Local development
 
 ```bash
@@ -225,7 +230,8 @@ static review, and the API bot-hint lookup. Process startup, the MCP handshake,
 OAuth login or refresh, and a hosted MCP runtime are outside the timer. The
 output contains aggregate p50/p95/p99/max latency, the API origin, and counts.
 It also reports response-header timing for the `/api/user` and `/api/bots`
-fetches and the remaining tool-call time after subtracting those two spans.
+fetches, their overlap, and the remaining tool-call time after subtracting the
+union of those intervals. Overlapping time is counted once.
 That remainder includes response bodies, local work, and stdio overhead; it is
 not a single server or network measurement. Output omits the credential,
 account, and source text. A failed or unauthorized
