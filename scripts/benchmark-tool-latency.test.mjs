@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { after, test } from "node:test";
 import { once } from "node:events";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const entry = fileURLToPath(new URL("../dist/index.js", import.meta.url));
@@ -77,4 +78,31 @@ test("rejects invalid credentials instead of timing an unauthorized response", a
     /tool call failed|unauthorized/i,
   );
   assert.equal(api.calls.bots, 0);
+});
+
+test("times a supplied application source without emitting its contents", async () => {
+  const { runBenchmark } = await import("./benchmark-tool-latency.mjs");
+  const api = await apiServer();
+  const content = 'export function privateFixtureMarker(value: number) { return value * 2; }';
+  const result = await runBenchmark({
+    apiUrl: api.url,
+    token: "benchmark-test-token",
+    entry,
+    content,
+    warmup: 1,
+    samples: 2,
+  });
+  assert.equal(result.input, "provided application source");
+  assert.equal(result.inputBytes, Buffer.byteLength(content));
+  assert.equal(result.inputSha256, createHash("sha256").update(content).digest("hex"));
+  assert.equal(result.successCount, 2);
+  assert.deepEqual(api.calls, { user: 3, bots: 3 });
+  assert.doesNotMatch(JSON.stringify(result), /privateFixtureMarker|benchmark-test-token/);
+});
+
+test("rejects empty supplied application source before starting the tool", async () => {
+  const { runBenchmark } = await import("./benchmark-tool-latency.mjs");
+  const api = await apiServer();
+  await assert.rejects(runBenchmark({ apiUrl: api.url, token: "benchmark-test-token", entry, content: "  " }), /content/i);
+  assert.deepEqual(api.calls, { user: 0, bots: 0 });
 });
