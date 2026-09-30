@@ -1,11 +1,13 @@
 import { performance } from "node:perf_hooks";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const defaultEntry = fileURLToPath(new URL("../dist/index.js", import.meta.url));
 const fetchSpanModule = new URL("./benchmark-fetch-spans.mjs", import.meta.url).href;
-const fixture = 'export function loadStatus() { return fetch("http://example.com/status"); }';
+const defaultFixture = 'export function loadStatus() { return fetch("http://example.com/status"); }';
 
 function count(value, name, minimum, maximum) {
   if (!Number.isInteger(value) || value < minimum || value > maximum) {
@@ -32,6 +34,7 @@ export async function runBenchmark({
   apiUrl,
   token,
   entry = defaultEntry,
+  content,
   warmup = 5,
   samples = 50,
 }) {
@@ -39,6 +42,10 @@ export async function runBenchmark({
     throw new Error("Set SKALEAGENTS_API_TOKEN in the environment; the benchmark does not start OAuth");
   }
   const origin = new URL(apiUrl).origin;
+  const input = content === undefined ? defaultFixture : content;
+  if (typeof input !== "string" || input.trim() === "" || input.length > 500_000) {
+    throw new Error("content must be nonempty application source of at most 500,000 characters");
+  }
   count(warmup, "warmup", 0, 20);
   count(samples, "samples", 1, 200);
 
@@ -78,7 +85,7 @@ export async function runBenchmark({
       const result = await client.callTool(
         {
           name: "review_architecture",
-          arguments: { content: fixture, focus: "security", format: "application" },
+          arguments: { content: input, focus: "security", format: "application" },
         },
         undefined,
         { timeout: 20_000 },
@@ -89,7 +96,8 @@ export async function runBenchmark({
         result.isError ||
         review?.status !== "completed" ||
         review?.format !== "application" ||
-        !review.findings?.some((finding) => finding.title === "Unencrypted HTTP endpoint")
+        !Array.isArray(review.findings) ||
+        (content === undefined && !review.findings.some((finding) => finding.title === "Unencrypted HTTP endpoint"))
       ) {
         throw new Error("MCP tool call failed or returned an incomplete review");
       }
@@ -129,7 +137,9 @@ export async function runBenchmark({
     apiOrigin: origin,
     tool: "review_architecture",
     transport: "stdio",
-    input: "synthetic application snippet",
+    input: content === undefined ? "synthetic application snippet" : "provided application source",
+    inputBytes: Buffer.byteLength(input),
+    inputSha256: createHash("sha256").update(input).digest("hex"),
     auth: "existing bearer token validated on every call",
     timingBoundary: "JSON-RPC tools/call request to complete response; excludes process startup and initial MCP handshake",
     warmupCount: warmup,
@@ -153,6 +163,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const result = await runBenchmark({
       apiUrl: process.env.PLATFORM_API_URL || "https://api.skaleagents.com",
       token: process.env.SKALEAGENTS_API_TOKEN,
+      content: process.env.BENCHMARK_INPUT_FILE ? await readFile(process.env.BENCHMARK_INPUT_FILE, "utf8") : undefined,
       warmup: Number(process.env.BENCHMARK_WARMUP ?? 5),
       samples: Number(process.env.BENCHMARK_SAMPLES ?? 50),
     });

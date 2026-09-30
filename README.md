@@ -213,6 +213,12 @@ server, makes five warmup calls, then times 50 `review_architecture` calls on a
 fixed synthetic application snippet. Set `BENCHMARK_WARMUP` from 0 to 20 and
 `BENCHMARK_SAMPLES` from 1 to 200 to change those counts. It refuses to start
 without the token and never opens an OAuth browser flow.
+Set `BENCHMARK_INPUT_FILE` to an existing, non-secret application source file to
+measure that source instead of the fixed snippet. Run separate samples for
+different file sizes or code patterns. The output reports only the input byte
+count and SHA-256 digest, not its path or contents. The supplied source must be
+nonempty and at most 500,000 characters. Use the same local file and pinned
+package commit when comparing runs.
 
 Each timed call includes JSON-RPC transport, hosted API account validation,
 static review, and the API bot-hint lookup. Process startup, the MCP handshake,
