@@ -14,12 +14,16 @@ globalThis.fetch = async (...args) => {
   if (!measuredPaths.has(path)) return originalFetch(...args);
 
   const started = performance.now();
+  const record = (status) => {
+    const ended = performance.now();
+    process.stderr.write(`T79_FETCH_SPAN ${JSON.stringify({ path, startedMs: started, endedMs: ended, durationMs: ended - started, status })}\n`);
+  };
   try {
     const response = await originalFetch(...args);
-    process.stderr.write(`T79_FETCH_SPAN ${JSON.stringify({ path, durationMs: performance.now() - started, status: response.status })}\n`);
+    record(response.status);
     return response;
   } catch (error) {
-    process.stderr.write(`T79_FETCH_SPAN ${JSON.stringify({ path, durationMs: performance.now() - started, status: 0 })}\n`);
+    record(0);
     throw error;
   }
 };

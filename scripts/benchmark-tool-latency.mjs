@@ -30,6 +30,20 @@ function summary(values) {
   };
 }
 
+export function fetchIntervalUnionMs(spans) {
+  const sorted = spans.toSorted((a, b) => a.startedMs - b.startedMs);
+  let duration = 0;
+  let end = -Infinity;
+  for (const span of sorted) {
+    if (!Number.isFinite(span.startedMs) || !Number.isFinite(span.endedMs) || span.endedMs < span.startedMs) {
+      throw new Error("Invalid fetch timing interval");
+    }
+    duration += Math.max(0, span.endedMs - Math.max(end, span.startedMs));
+    end = Math.max(end, span.endedMs);
+  }
+  return duration;
+}
+
 export async function runBenchmark({
   apiUrl,
   token,
@@ -120,15 +134,19 @@ export async function runBenchmark({
   const userFetches = [];
   const botFetches = [];
   const otherToolCall = [];
+  const fetchOverlap = [];
   for (let index = warmup; index < warmup + samples; index++) {
-    const user = fetchSpans[index * 2];
-    const bots = fetchSpans[index * 2 + 1];
-    if (user.path !== "/api/user" || bots.path !== "/api/bots" || user.status !== 200 || bots.status !== 200) {
-      throw new Error("Unexpected fetch timing span order or status");
+    const spans = fetchSpans.slice(index * 2, index * 2 + 2);
+    const user = spans.find((span) => span.path === "/api/user");
+    const bots = spans.find((span) => span.path === "/api/bots");
+    if (!user || !bots || user.status !== 200 || bots.status !== 200) {
+      throw new Error("Unexpected fetch timing span paths or status");
     }
     userFetches.push(user.durationMs);
     botFetches.push(bots.durationMs);
-    otherToolCall.push(durations[index - warmup] - user.durationMs - bots.durationMs);
+    const union = fetchIntervalUnionMs(spans);
+    fetchOverlap.push(user.durationMs + bots.durationMs - union);
+    otherToolCall.push(durations[index - warmup] - union);
   }
 
   const sorted = durations.toSorted((a, b) => a - b);
@@ -154,6 +172,8 @@ export async function runBenchmark({
       "/api/user": summary(userFetches),
       "/api/bots": summary(botFetches),
     },
+    fetchOverlapMs: summary(fetchOverlap),
+    otherToolCallBoundary: "elapsed tool-call time outside the union of API request-to-response-header intervals",
     otherToolCallMs: summary(otherToolCall),
   };
 }

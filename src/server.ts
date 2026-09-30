@@ -1,10 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import {
-  getApiAccessToken,
-  requireApiAuth,
-  unauthorizedContent,
-} from "./auth.js";
+import { requireApiAuth, unauthorizedContent } from "./auth.js";
 import { architectureFindings, fetchPublicBotHints } from "./review.js";
 import { looksLikeIac, ScanInputError } from "./iac/parse.js";
 import { filterFindings, scanIac, summarize } from "./iac/scan.js";
@@ -101,13 +97,10 @@ export function createServer(remote = false) {
       },
     },
     async ({ content, focus, format, minSeverity, maxFindings }) => {
-      let token: string | undefined;
+      const botHints = fetchPublicBotHints();
       if (!remote) {
         const auth = await requireApiAuth();
         if (!auth.ok) return unauthorizedContent(auth);
-        token = (await getApiAccessToken()) ?? undefined;
-        if (!token)
-          return unauthorizedContent({ ok: false, reason: "oauth_failed" });
       }
       try {
         const options = { focus, minSeverity, maxFindings };
@@ -117,7 +110,7 @@ export function createServer(remote = false) {
         ) {
           return result({
             ...scanIac(content, { ...options, format }),
-            botHints: await fetchPublicBotHints(token),
+            botHints: await botHints,
           });
         }
         const findings = filterFindings(
@@ -137,7 +130,7 @@ export function createServer(remote = false) {
           limitations: [
             "Application checks are text patterns, not a language-aware or runtime analysis. Findings do not establish that code is safe.",
           ],
-          botHints: await fetchPublicBotHints(token),
+          botHints: await botHints,
         });
       } catch (error) {
         return inputError(error);

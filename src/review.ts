@@ -251,13 +251,12 @@ export function externalHttp(value: string): boolean {
   }
 }
 
-export async function fetchPublicBotHints(token?: string): Promise<string[]> {
+export async function fetchPublicBotHints(): Promise<string[]> {
   try {
     const res = await fetch(`${getApiUrl()}/api/bots`, {
       signal: AbortSignal.timeout(10_000),
       headers: {
         Accept: "application/json",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
     });
     if (!res.ok) return [];
