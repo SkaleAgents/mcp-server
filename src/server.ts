@@ -87,13 +87,14 @@ export function createServer(remote = false) {
             "cloudformation",
             "kubernetes",
             "pulumi",
+            "compose",
             "application",
             "auto",
           ])
           .optional()
           .default("auto")
           .describe(
-            "Content format: terraform, cloudformation, kubernetes, pulumi, application, auto",
+            "Content format: terraform, cloudformation, kubernetes, pulumi, compose, application, auto",
           ),
       },
     },
@@ -152,7 +153,7 @@ export function createServer(remote = false) {
           (name === "scan_iac_stub"
             ? "Compatibility alias for scan_iac; runs the full scanner. "
             : "") +
-          "Parse Terraform HCL/JSON, CloudFormation YAML/JSON, Kubernetes manifests, or Pulumi YAML. Check security, reliability and cost rules with resource locations and remediation. Pulumi TypeScript, Python, and Go programs are not parsed yet.",
+          "Parse Terraform HCL/JSON, CloudFormation YAML/JSON, Kubernetes manifests, Pulumi YAML, Pulumi programs, or Docker Compose. Check security, reliability and cost rules with resource locations and remediation. Pulumi programs are scanned as text.",
         annotations: {
           readOnlyHint: true,
           destructiveHint: false,
@@ -161,10 +162,17 @@ export function createServer(remote = false) {
         _meta: { securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }] },
         inputSchema: {
           content: contentSchema.describe(
-            "Terraform HCL/JSON, CloudFormation YAML/JSON, Kubernetes YAML/JSON, or Pulumi YAML",
+            "Terraform HCL/JSON, CloudFormation YAML/JSON, Kubernetes YAML/JSON, Pulumi YAML or program text, or Docker Compose",
           ),
           format: z
-            .enum(["terraform", "cloudformation", "kubernetes", "pulumi", "auto"])
+            .enum([
+              "terraform",
+              "cloudformation",
+              "kubernetes",
+              "pulumi",
+              "compose",
+              "auto",
+            ])
             .default("auto"),
           ...filters,
         },

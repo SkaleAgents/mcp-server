@@ -210,6 +210,41 @@ export function architectureFindings(
         "Retries are set to unlimited. Cap retries and add backoff so a failing dependency cannot amplify load.",
     });
   }
+  if (
+    shouldInclude(focusValue, "reliability") &&
+    /(?:max_?open_?conns|maxOpenConns|SetMaxOpenConns)\s*(?:[:=]|\()\s*0\b/.test(
+      content,
+    )
+  ) {
+    findings.push({
+      severity: "high",
+      title: "Database connection limit is unlimited",
+      detail:
+        "The database client allows unlimited open connections. Set a finite pool size so a traffic spike cannot exhaust the database.",
+    });
+  }
+  if (
+    shouldInclude(focusValue, "reliability") &&
+    /(?:mem_limit|memory_limit)\s*[:=]\s*["']?0\b/i.test(content)
+  ) {
+    findings.push({
+      severity: "medium",
+      title: "Memory limit is disabled",
+      detail:
+        "The memory limit is zero. Set a memory limit so one workload cannot consume the host.",
+    });
+  }
+  if (
+    shouldInclude(focusValue, "security") &&
+    /^\s*USER\s+root\s*$/im.test(content)
+  ) {
+    findings.push({
+      severity: "medium",
+      title: "Container runs as root",
+      detail:
+        "The container user is root. Run the process as an unprivileged user.",
+    });
+  }
   return findings.map((finding, index) => {
     if (index === 0) return finding;
     const matchers: Record<string, RegExp> = {
@@ -235,6 +270,11 @@ export function architectureFindings(
         /(?:pool_size|max_connections|connectionLimit|maxPoolSize|maximumPoolSize|max_pool_size)\s*[:=]\s*1\b/,
       "Retry limit is unbounded":
         /(?:max_?retries|retry_?count|retries)\s*[:=]\s*(?:-1|Infinity)\b/i,
+      "Database connection limit is unlimited":
+        /(?:max_?open_?conns|maxOpenConns|SetMaxOpenConns)\s*(?:[:=]|\()\s*0\b/,
+      "Memory limit is disabled":
+        /(?:mem_limit|memory_limit)\s*[:=]\s*["']?0\b/i,
+      "Container runs as root": /^\s*USER\s+root\s*$/im,
     };
     const pattern = matchers[finding.title];
     const matches = pattern
@@ -268,6 +308,8 @@ export function architectureFindings(
               "Outbound call has no timeout",
               "Connection pool is capped at one",
               "Retry limit is unbounded",
+              "Database connection limit is unlimited",
+              "Memory limit is disabled",
             ].includes(finding.title)
           ? "reliability"
           : "security") as Finding["category"],

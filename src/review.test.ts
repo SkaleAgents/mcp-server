@@ -111,6 +111,33 @@ describe("architectureFindings", () => {
     );
   });
 
+  it("flags an unlimited database pool, a disabled memory limit, and a root container user", () => {
+    const findings = architectureFindings(
+      "db.SetMaxOpenConns(0)\nmem_limit: 0\nUSER root\n",
+      "general",
+    );
+    assert.ok(
+      findings.some((f) => f.title === "Database connection limit is unlimited"),
+    );
+    assert.ok(findings.some((f) => f.title === "Memory limit is disabled"));
+    assert.equal(
+      findings.find((f) => f.title === "Container runs as root")?.location?.line,
+      3,
+    );
+    const safe = architectureFindings(
+      "db.SetMaxOpenConns(20)\nmem_limit: 512m\nUSER app\n",
+      "general",
+    );
+    assert.ok(
+      !safe.some(
+        (f) =>
+          f.title === "Database connection limit is unlimited" ||
+          f.title === "Memory limit is disabled" ||
+          f.title === "Container runs as root",
+      ),
+    );
+  });
+
   it("limits findings to the selected focus", () => {
     const findings = architectureFindings(
       "debug: true\n0.0.0.0/0",

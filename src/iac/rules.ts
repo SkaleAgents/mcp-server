@@ -285,6 +285,7 @@ export function resourceFindings(
       );
     });
     if (format === "kubernetes") checkKubernetes(resource, resources, check);
+    else if (format === "compose") checkCompose(resource, check);
     else checkCloud(resource, resources, format, check);
   }
   return { findings, checked };
@@ -310,6 +311,20 @@ function walk(
       if (child && typeof child === "object")
         walk(child, visit, [...path, key]);
     }
+}
+
+function checkCompose(resource: Resource, check: Check): void {
+  const service = resource.value;
+  check("K8S001", service.privileged === true, ["privileged"]);
+  check(
+    "NET001",
+    array(service.ports).some((port) => {
+      if (typeof port === "string") return port.includes("0.0.0.0");
+      const mapping = object(port);
+      return mapping.host_ip === "0.0.0.0" || mapping.hostIp === "0.0.0.0";
+    }),
+    ["ports"],
+  );
 }
 
 function checkCloud(

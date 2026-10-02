@@ -1,7 +1,12 @@
 import hcl from "hcl2-parser";
 import { LineCounter, parseAllDocuments } from "yaml";
 
-export type IacFormat = "terraform" | "cloudformation" | "kubernetes" | "pulumi";
+export type IacFormat =
+  | "terraform"
+  | "cloudformation"
+  | "kubernetes"
+  | "pulumi"
+  | "compose";
 export type Path = (string | number)[];
 export type Location = { line: number; column: number; path: string };
 export type Resource = {
@@ -68,8 +73,20 @@ export function looksLikeIac(content: string): boolean {
     /^\s*\{\s*"(?:resource|Resources|apiVersion|AWSTemplateFormatVersion)"\s*:/.test(
       content,
     ) ||
-    looksLikePulumiYaml(content)
+    looksLikePulumiYaml(content) ||
+    looksLikePulumiProgram(content) ||
+    looksLikeCompose(content)
   );
+}
+
+export function looksLikePulumiProgram(content: string): boolean {
+  return /(?:^|\n)\s*(?:import\s+\*\s+as\s+pulumi\b|import\s+pulumi\b|from\s+["']@pulumi\/)/.test(
+    content,
+  );
+}
+
+export function looksLikeCompose(content: string): boolean {
+  return /^\s*services\s*:/m.test(content) && /^\s+image\s*:/m.test(content);
 }
 
 export function looksLikePulumiYaml(content: string): boolean {
@@ -87,13 +104,11 @@ export function parseIac(
     throw new ScanInputError("Content must not be empty or whitespace.");
   if (
     requested !== "terraform" &&
-    /(?:^|\n)\s*(?:import\s+\*\s+as\s+pulumi\b|import\s+pulumi\b|from\s+["']@pulumi\/)/.test(
-      content,
-    )
+    requested !== "compose" &&
+    looksLikePulumiProgram(content) &&
+    !looksLikePulumiYaml(content)
   ) {
-    throw new ScanInputError(
-      "Pulumi TypeScript, Python, and Go programs are not parsed yet. Submit Pulumi YAML.",
-    );
+    return parsePulumiProgram(content);
   }
   const warnings: string[] = [];
   const resources: Resource[] = [];
@@ -217,13 +232,20 @@ export function parseIac(
     checkShape(data);
     const root = object(data);
     const pulumiResources = pulumiResourceMap(root);
+    const services = composeServiceMap(root);
     let detected: IacFormat | undefined;
     if (requested === "pulumi" || (requested === "auto" && pulumiResources)) {
       if (!pulumiResources)
         throw new ScanInputError(
-          "Pulumi YAML requires a resources mapping. Each resource needs a type token. Pulumi TypeScript, Python, and Go programs are not parsed yet.",
+          "Pulumi YAML requires a resources mapping. Each resource needs a type token.",
         );
       detected = "pulumi";
+    } else if (requested === "compose" || (requested === "auto" && services)) {
+      if (!services)
+        throw new ScanInputError(
+          "Docker Compose requires a services mapping with an image, build, or ports field.",
+        );
+      detected = "compose";
     } else {
       detected = root.Resources
         ? "cloudformation"
@@ -259,7 +281,10 @@ export function parseIac(
         },
       });
     };
-    if (format === "pulumi") {
+    if (format === "compose") {
+      for (const [name, raw] of Object.entries(services ?? {}))
+        add(name, "compose:service", raw, ["services", name]);
+    } else if (format === "pulumi") {
       for (const [name, raw] of Object.entries(pulumiResources ?? {})) {
         const value = object(raw);
         add(name, String(value.type), value, ["resources", name]);
@@ -345,7 +370,7 @@ export function parseIac(
   }
   if (!format)
     throw new ScanInputError(
-      "No IaC document found. Choose Terraform, CloudFormation, Kubernetes, or Pulumi YAML.",
+      "No IaC document found. Choose Terraform, CloudFormation, Kubernetes, Pulumi, or Docker Compose.",
     );
   if (!resources.length)
     warnings.push("No resources found in the submitted document.");
@@ -354,6 +379,65 @@ export function parseIac(
       "Intrinsic functions and expressions are not evaluated. Only literal configuration is checked.",
     );
   return { format, resources, warnings };
+}
+
+function parsePulumiProgram(content: string): ParsedIac {
+  const searchable = content
+    .replace(/\/\*[\s\S]*?\*\//g, (match) => match.replace(/[^\n]/g, " "))
+    .replace(/(^|[^:])\/\/[^\n]*/g, (match) => match.replace(/[^\n]/g, " "))
+    .replace(/(^|\n)\s*#[^\n]*/g, (match) => match.replace(/[^\n]/g, " "));
+  const resources: Resource[] = [];
+  for (const match of searchable.matchAll(/(?:0\.0\.0\.0\/0|::\/0)/g)) {
+    const offset = match.index ?? 0;
+    const window = searchable.slice(Math.max(0, offset - 1500), offset);
+    const ingressAt = window.toLowerCase().lastIndexOf("ingress");
+    const egressAt = window.toLowerCase().lastIndexOf("egress");
+    if (ingressAt < 0 || egressAt > ingressAt) continue;
+    const before = content.slice(0, offset);
+    resources.push({
+      id: `pulumi.program.${resources.length + 1}`,
+      type: "pulumi:program/securityGroup:SecurityGroup",
+      value: { properties: { ingress: [{ cidrBlocks: [match[0]] }] } },
+      locate: () => ({
+        line: before.split("\n").length,
+        column: offset - before.lastIndexOf("\n"),
+        path: "ingress.cidrBlocks",
+      }),
+    });
+  }
+  return {
+    format: "pulumi",
+    resources,
+    warnings: [
+      "Pulumi programs are scanned as text. Computed values, stacks, and external modules are not evaluated.",
+      ...(resources.length
+        ? []
+        : ["No literal ingress CIDRs were found in the Pulumi program."]),
+    ],
+  };
+}
+
+function composeServiceMap(
+  root: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  if (root.apiVersion || root.kind || root.Resources || root.resources)
+    return undefined;
+  const services = object(root.services);
+  const entries = Object.entries(services);
+  if (
+    entries.length > 0 &&
+    entries.every(([, raw]) => {
+      const service = object(raw);
+      return (
+        "image" in service ||
+        "build" in service ||
+        "ports" in service ||
+        "privileged" in service
+      );
+    })
+  )
+    return services;
+  return undefined;
 }
 
 function pulumiResourceMap(
