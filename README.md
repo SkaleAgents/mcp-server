@@ -109,7 +109,8 @@ See [client setup](https://skaleagents.com/settings) for Cursor, Claude Code,
 Claude Desktop, ChatGPT, and Codex instructions.
 
 The web app hosts this endpoint using `handleMcpRequest` from
-`@skaleagents/swarm/http`. It validates each bearer credential with the API's
+`@skaleagents/swarm/http`. Audit workers import `scanIac` from
+`@skaleagents/swarm/scan`. It validates each bearer credential with the API's
 `/api/oauth/mcp-token` endpoint before running a tool. Tokens are bound to the
 MCP resource and cannot access unrelated API routes. Credentials are not
 forwarded to the public bot directory.
