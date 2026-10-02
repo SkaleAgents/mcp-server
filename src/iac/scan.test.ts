@@ -314,14 +314,49 @@ resources:
     assert.equal(scan.findings.filter((f) => f.ruleId === "NET001").length, 1);
     assert.match(scan.findings[0].location!.path, /ingress/);
   });
-  it("rejects Pulumi programs that are not YAML", () => {
-    assert.throws(
-      () =>
-        scanIac('import * as pulumi from "@pulumi/pulumi";\n', {
-          format: "pulumi",
-        }),
-      /Submit Pulumi YAML/,
+  it("scans public ingress in Pulumi programs and ignores egress and comments", () => {
+    const scan = scanIac(
+      `import * as pulumi from "@pulumi/pulumi";
+const sg = new aws.ec2.SecurityGroup("web", {
+  ingress: [{ cidrBlocks: ["0.0.0.0/0"] }],
+  egress: [{ cidrBlocks: ["0.0.0.0/0"] }],
+});
+`,
+      { format: "auto" },
     );
+    assert.equal(scan.format, "pulumi");
+    assert.equal(scan.findings.filter((f) => f.ruleId === "NET001").length, 1);
+    assert.equal(scan.findings[0].location?.line, 3);
+    const python = scanIac(
+      `import pulumi
+sg = aws.ec2.SecurityGroup("web", ingress=[{"cidr_blocks": ["0.0.0.0/0"]}])
+`,
+    );
+    assert.equal(python.findings.filter((f) => f.ruleId === "NET001").length, 1);
+    const commented = scanIac(
+      'import * as pulumi from "@pulumi/pulumi";\n// ingress cidrBlocks: ["0.0.0.0/0"]\n',
+    );
+    assert.equal(commented.findings.length, 0);
+  });
+  it("scans Docker Compose privileged services and public port bindings", () => {
+    const scan = scanIac(
+      `services:
+  web:
+    image: nginx:1.27
+    privileged: true
+    ports:
+      - "0.0.0.0:80:80"
+  db:
+    image: postgres:16
+    ports:
+      - "127.0.0.1:5432:5432"
+`,
+      { format: "auto" },
+    );
+    assert.equal(scan.format, "compose");
+    assert.equal(scan.parsedResourceCount, 2);
+    assert.equal(scan.findings.filter((f) => f.ruleId === "K8S001").length, 1);
+    assert.equal(scan.findings.filter((f) => f.ruleId === "NET001").length, 1);
   });
   it("checks literal secrets independently of environment references and omits source values", () => {
     const scan = scanIac(
