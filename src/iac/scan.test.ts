@@ -289,6 +289,40 @@ describe("scanner output and validation", () => {
       0,
     );
   });
+  it("scans public ingress in Pulumi YAML and ignores egress", () => {
+    const content = `name: web
+runtime: yaml
+resources:
+  webSg:
+    type: aws:ec2/securityGroup:SecurityGroup
+    properties:
+      ingress:
+        - protocol: tcp
+          fromPort: 80
+          toPort: 80
+          cidrBlocks:
+            - 0.0.0.0/0
+      egress:
+        - protocol: "-1"
+          cidrBlocks:
+            - 0.0.0.0/0
+`;
+    const scan = scanIac(content, { format: "auto" });
+    assert.equal(looksLikeIac(content), true);
+    assert.equal(scan.format, "pulumi");
+    assert.equal(scan.parsedResourceCount, 1);
+    assert.equal(scan.findings.filter((f) => f.ruleId === "NET001").length, 1);
+    assert.match(scan.findings[0].location!.path, /ingress/);
+  });
+  it("rejects Pulumi programs that are not YAML", () => {
+    assert.throws(
+      () =>
+        scanIac('import * as pulumi from "@pulumi/pulumi";\n', {
+          format: "pulumi",
+        }),
+      /Submit Pulumi YAML/,
+    );
+  });
   it("checks literal secrets independently of environment references and omits source values", () => {
     const scan = scanIac(
       'resource "aws_db_instance" "test" {\n password = "example-test-only"\n username = var.username\n}',

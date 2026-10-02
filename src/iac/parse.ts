@@ -1,7 +1,7 @@
 import hcl from "hcl2-parser";
 import { LineCounter, parseAllDocuments } from "yaml";
 
-export type IacFormat = "terraform" | "cloudformation" | "kubernetes";
+export type IacFormat = "terraform" | "cloudformation" | "kubernetes" | "pulumi";
 export type Path = (string | number)[];
 export type Location = { line: number; column: number; path: string };
 export type Resource = {
@@ -67,7 +67,15 @@ export function looksLikeIac(content: string): boolean {
     /^\s*(?:["']?Resources["']?\s*:|apiVersion\s*:)/m.test(content) ||
     /^\s*\{\s*"(?:resource|Resources|apiVersion|AWSTemplateFormatVersion)"\s*:/.test(
       content,
-    )
+    ) ||
+    looksLikePulumiYaml(content)
+  );
+}
+
+export function looksLikePulumiYaml(content: string): boolean {
+  return (
+    /^\s*resources\s*:/m.test(content) &&
+    /^\s+type\s*:\s*[A-Za-z0-9_.-]+:\S+/m.test(content)
   );
 }
 
@@ -77,6 +85,16 @@ export function parseIac(
 ): ParsedIac {
   if (!content.trim())
     throw new ScanInputError("Content must not be empty or whitespace.");
+  if (
+    requested !== "terraform" &&
+    /(?:^|\n)\s*(?:import\s+\*\s+as\s+pulumi\b|import\s+pulumi\b|from\s+["']@pulumi\/)/.test(
+      content,
+    )
+  ) {
+    throw new ScanInputError(
+      "Pulumi TypeScript, Python, and Go programs are not parsed yet. Submit Pulumi YAML.",
+    );
+  }
   const warnings: string[] = [];
   const resources: Resource[] = [];
   const isHcl =
@@ -198,13 +216,23 @@ export function parseIac(
     if (data == null) continue;
     checkShape(data);
     const root = object(data);
-    const detected = root.Resources
-      ? "cloudformation"
-      : root.apiVersion && root.kind
-        ? "kubernetes"
-        : root.resource
-          ? "terraform"
-          : undefined;
+    const pulumiResources = pulumiResourceMap(root);
+    let detected: IacFormat | undefined;
+    if (requested === "pulumi" || (requested === "auto" && pulumiResources)) {
+      if (!pulumiResources)
+        throw new ScanInputError(
+          "Pulumi YAML requires a resources mapping. Each resource needs a type token. Pulumi TypeScript, Python, and Go programs are not parsed yet.",
+        );
+      detected = "pulumi";
+    } else {
+      detected = root.Resources
+        ? "cloudformation"
+        : root.apiVersion && root.kind
+          ? "kubernetes"
+          : root.resource
+            ? "terraform"
+            : undefined;
+    }
     format ??= detected;
     if (!format || (detected && detected !== format))
       throw new ScanInputError(
@@ -231,7 +259,12 @@ export function parseIac(
         },
       });
     };
-    if (format === "cloudformation") {
+    if (format === "pulumi") {
+      for (const [name, raw] of Object.entries(pulumiResources ?? {})) {
+        const value = object(raw);
+        add(name, String(value.type), value, ["resources", name]);
+      }
+    } else if (format === "cloudformation") {
       if (
         !root.Resources ||
         Array.isArray(root.Resources) ||
@@ -312,7 +345,7 @@ export function parseIac(
   }
   if (!format)
     throw new ScanInputError(
-      "No IaC document found. Choose Terraform, CloudFormation, or Kubernetes.",
+      "No IaC document found. Choose Terraform, CloudFormation, Kubernetes, or Pulumi YAML.",
     );
   if (!resources.length)
     warnings.push("No resources found in the submitted document.");
@@ -321,6 +354,22 @@ export function parseIac(
       "Intrinsic functions and expressions are not evaluated. Only literal configuration is checked.",
     );
   return { format, resources, warnings };
+}
+
+function pulumiResourceMap(
+  root: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const resources = object(root.resources);
+  const entries = Object.entries(resources);
+  if (
+    entries.length > 0 &&
+    entries.every(([, raw]) => {
+      const type = object(raw).type;
+      return typeof type === "string" && type.includes(":");
+    })
+  )
+    return resources;
+  return undefined;
 }
 
 function escapeRegex(value: string): string {
