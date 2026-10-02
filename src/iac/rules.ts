@@ -319,10 +319,18 @@ function checkCloud(
   check: Check,
 ): void {
   const tf = format === "terraform";
-  const value = tf ? resource.value : object(resource.value.Properties);
-  const prefix: Path = tf ? [] : ["Properties"];
-  const property = (hcl: string, cfn: string) => value[tf ? hcl : cfn];
-  const path = (hcl: string, cfn: string) => [...prefix, tf ? hcl : cfn];
+  const pulumi = format === "pulumi";
+  const value = tf
+    ? resource.value
+    : pulumi
+      ? object(resource.value.properties)
+      : object(resource.value.Properties);
+  const prefix: Path = tf ? [] : pulumi ? ["properties"] : ["Properties"];
+  const property = (hcl: string, cfn: string) => value[tf || pulumi ? hcl : cfn];
+  const path = (hcl: string, cfn: string) => [
+    ...prefix,
+    tf || pulumi ? hcl : cfn,
+  ];
   walk(value, (key, child, at, parent) => {
     const isIngress =
       !at.some((part) =>
@@ -331,7 +339,7 @@ function checkCloud(
       !/egress/i.test(resource.type) &&
       value.type !== "egress";
     if (
-      /^(?:cidr_blocks|ipv6_cidr_blocks|cidr_ipv4|cidr_ipv6|CidrIp|CidrIpv6)$/.test(
+      /^(?:cidr_blocks|ipv6_cidr_blocks|cidr_ipv4|cidr_ipv6|cidrBlocks|ipv6CidrBlocks|cidrBlock|CidrIp|CidrIpv6)$/.test(
         key,
       ) &&
       isIngress

@@ -86,13 +86,14 @@ export function createServer(remote = false) {
             "terraform",
             "cloudformation",
             "kubernetes",
+            "pulumi",
             "application",
             "auto",
           ])
           .optional()
           .default("auto")
           .describe(
-            "Content format: terraform, cloudformation, kubernetes, application, auto",
+            "Content format: terraform, cloudformation, kubernetes, pulumi, application, auto",
           ),
       },
     },
@@ -150,7 +151,7 @@ export function createServer(remote = false) {
           (name === "scan_iac_stub"
             ? "Compatibility alias for scan_iac; runs the full scanner. "
             : "") +
-          "Parse Terraform HCL/JSON, CloudFormation YAML/JSON, or Kubernetes manifests. Check security, reliability and cost rules with resource locations and remediation.",
+          "Parse Terraform HCL/JSON, CloudFormation YAML/JSON, Kubernetes manifests, or Pulumi YAML. Check security, reliability and cost rules with resource locations and remediation. Pulumi TypeScript, Python, and Go programs are not parsed yet.",
         annotations: {
           readOnlyHint: true,
           destructiveHint: false,
@@ -159,10 +160,10 @@ export function createServer(remote = false) {
         _meta: { securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }] },
         inputSchema: {
           content: contentSchema.describe(
-            "Terraform HCL/JSON, CloudFormation YAML/JSON, or Kubernetes YAML/JSON",
+            "Terraform HCL/JSON, CloudFormation YAML/JSON, Kubernetes YAML/JSON, or Pulumi YAML",
           ),
           format: z
-            .enum(["terraform", "cloudformation", "kubernetes", "auto"])
+            .enum(["terraform", "cloudformation", "kubernetes", "pulumi", "auto"])
             .default("auto"),
           ...filters,
         },
