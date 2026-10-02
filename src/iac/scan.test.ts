@@ -326,7 +326,29 @@ const sg = new aws.ec2.SecurityGroup("web", {
     );
     assert.equal(scan.format, "pulumi");
     assert.equal(scan.findings.filter((f) => f.ruleId === "NET001").length, 1);
-    assert.equal(scan.findings[0].location?.line, 3);
+    assert.equal(
+      scan.findings.find((f) => f.ruleId === "NET001")?.location?.line,
+      3,
+    );
+    const deeper = scanIac(
+      `import * as pulumi from "@pulumi/pulumi";
+const db = new aws.rds.Instance("db", {
+  publiclyAccessible: true,
+  storageEncrypted: false,
+  backupRetentionPeriod: 0,
+});
+const policy = { effect: "Allow", actions: ["*"] };
+const denied = { effect: "Deny", actions: ["*"] };
+const key = "AKIAIOSFODNN7EXAMPLE";
+`,
+    );
+    for (const id of ["DB001", "DATA002", "DB002", "IAM001", "SEC002"])
+      assert.equal(
+        deeper.findings.filter((f) => f.ruleId === id).length,
+        1,
+        id,
+      );
+    assert.ok(!JSON.stringify(deeper).includes("AKIAIOSFODNN7EXAMPLE"));
     const python = scanIac(
       `import pulumi
 sg = aws.ec2.SecurityGroup("web", ingress=[{"cidr_blocks": ["0.0.0.0/0"]}])
@@ -357,6 +379,27 @@ sg = aws.ec2.SecurityGroup("web", ingress=[{"cidr_blocks": ["0.0.0.0/0"]}])
     assert.equal(scan.parsedResourceCount, 2);
     assert.equal(scan.findings.filter((f) => f.ruleId === "K8S001").length, 1);
     assert.equal(scan.findings.filter((f) => f.ruleId === "NET001").length, 1);
+    assert.equal(scan.findings.filter((f) => f.ruleId === "K8S008").length, 2);
+  });
+  it("scans Compose host access, capabilities, image pins, and short public ports", () => {
+    const scan = scanIac(
+      `services:
+  web:
+    image: nginx
+    user: root
+    network_mode: host
+    cap_add:
+      - SYS_ADMIN
+    ports:
+      - "80:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    mem_limit: 256m
+`,
+    );
+    for (const id of ["K8S002", "K8S003", "K8S004", "K8S006", "K8S007", "NET001"])
+      assert.equal(scan.findings.filter((f) => f.ruleId === id).length, 1, id);
+    assert.equal(scan.findings.filter((f) => f.ruleId === "K8S008").length, 0);
   });
   it("checks literal secrets independently of environment references and omits source values", () => {
     const scan = scanIac(

@@ -313,18 +313,68 @@ function walk(
     }
 }
 
+function composePortIsPublic(port: unknown): boolean {
+  if (typeof port === "string") {
+    const value = port.trim();
+    if (/^(?:127\.0\.0\.1|localhost):/.test(value)) return false;
+    if (value.includes("0.0.0.0")) return true;
+    return /^\d+:\d+(?:\/[A-Za-z0-9]+)?$/.test(value);
+  }
+  const mapping = object(port);
+  const host = mapping.host_ip ?? mapping.hostIp;
+  if (host === "127.0.0.1" || host === "localhost") return false;
+  return host === "0.0.0.0" || mapping.published != null || mapping.target != null;
+}
+
 function checkCompose(resource: Resource, check: Check): void {
   const service = resource.value;
+  const image = typeof service.image === "string" ? service.image : "";
+  const limits = object(object(object(service.deploy).resources).limits);
+  const user = service.user;
   check("K8S001", service.privileged === true, ["privileged"]);
+  check("K8S002", service.network_mode === "host", ["network_mode"]);
   check(
-    "NET001",
-    array(service.ports).some((port) => {
-      if (typeof port === "string") return port.includes("0.0.0.0");
-      const mapping = object(port);
-      return mapping.host_ip === "0.0.0.0" || mapping.hostIp === "0.0.0.0";
+    "K8S003",
+    array(service.volumes).some((volume) => {
+      const text =
+        typeof volume === "string"
+          ? volume
+          : String(object(volume).source ?? object(volume).target ?? "");
+      return (
+        text.includes("docker.sock") ||
+        /(?:^|:)\/:/.test(text) ||
+        text.startsWith("/var/run/")
+      );
     }),
-    ["ports"],
+    ["volumes"],
   );
+  check(
+    "K8S004",
+    user === "root" || user === "0" || user === 0,
+    ["user"],
+  );
+  check(
+    "K8S006",
+    array(service.cap_add).some((cap) =>
+      ["ALL", "SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE"].includes(
+        String(cap).toUpperCase(),
+      ),
+    ),
+    ["cap_add"],
+  );
+  check(
+    "K8S007",
+    image !== "" && (image.endsWith(":latest") || !/[:@]/.test(image)),
+    ["image"],
+  );
+  check(
+    "K8S008",
+    service.mem_limit == null &&
+      limits.memory == null &&
+      service.mem_reservation == null,
+    ["mem_limit"],
+  );
+  check("NET001", array(service.ports).some(composePortIsPublic), ["ports"]);
 }
 
 function checkCloud(
