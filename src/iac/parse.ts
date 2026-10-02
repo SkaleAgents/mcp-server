@@ -381,38 +381,115 @@ export function parseIac(
   return { format, resources, warnings };
 }
 
-function parsePulumiProgram(content: string): ParsedIac {
-  const searchable = content
+function programLocation(content: string, offset: number, path: string) {
+  const before = content.slice(0, offset);
+  return {
+    line: before.split("\n").length,
+    column: offset - before.lastIndexOf("\n"),
+    path,
+  };
+}
+
+function stripProgramComments(content: string): string {
+  return content
     .replace(/\/\*[\s\S]*?\*\//g, (match) => match.replace(/[^\n]/g, " "))
     .replace(/(^|[^:])\/\/[^\n]*/g, (match) => match.replace(/[^\n]/g, " "))
     .replace(/(^|\n)\s*#[^\n]*/g, (match) => match.replace(/[^\n]/g, " "));
+}
+
+function parsePulumiProgram(content: string): ParsedIac {
+  const searchable = stripProgramComments(content);
   const resources: Resource[] = [];
+  const addProgram = (
+    id: string,
+    type: string,
+    value: Record<string, unknown>,
+    offset: number,
+    path: string,
+  ) => {
+    resources.push({
+      id,
+      type,
+      value,
+      locate: () => programLocation(content, offset, path),
+    });
+  };
   for (const match of searchable.matchAll(/(?:0\.0\.0\.0\/0|::\/0)/g)) {
     const offset = match.index ?? 0;
     const window = searchable.slice(Math.max(0, offset - 1500), offset);
     const ingressAt = window.toLowerCase().lastIndexOf("ingress");
     const egressAt = window.toLowerCase().lastIndexOf("egress");
     if (ingressAt < 0 || egressAt > ingressAt) continue;
-    const before = content.slice(0, offset);
-    resources.push({
-      id: `pulumi.program.${resources.length + 1}`,
-      type: "pulumi:program/securityGroup:SecurityGroup",
-      value: { properties: { ingress: [{ cidrBlocks: [match[0]] }] } },
-      locate: () => ({
-        line: before.split("\n").length,
-        column: offset - before.lastIndexOf("\n"),
-        path: "ingress.cidrBlocks",
-      }),
-    });
+    addProgram(
+      `pulumi.program.ingress.${resources.length + 1}`,
+      "pulumi:program/securityGroup:SecurityGroup",
+      { properties: { ingress: [{ cidrBlocks: [match[0]] }] } },
+      offset,
+      "ingress.cidrBlocks",
+    );
   }
+  const database: Record<string, unknown> = {};
+  const publicDb = /publicly_?accessible\s*[:=]\s*true\b/i.exec(searchable);
+  const unencrypted = /storage_?encrypted\s*[:=]\s*false\b/i.exec(searchable);
+  const noBackup = /backup_?retention_?period\s*[:=]\s*0\b/i.exec(searchable);
+  if (publicDb) database.publicly_accessible = true;
+  if (unencrypted) database.storage_encrypted = false;
+  if (noBackup) database.backup_retention_period = 0;
+  const databaseMatch = publicDb ?? unencrypted ?? noBackup;
+  if (databaseMatch) {
+    addProgram(
+      "pulumi.program.database",
+      "aws_db_instance",
+      { properties: database },
+      databaseMatch.index,
+      "database",
+    );
+  }
+  const publicAcl =
+    /(?:acl|accessControl)\s*[:=]\s*["']public-read(?:-write)?["']/i.exec(
+      searchable,
+    );
+  if (publicAcl) {
+    addProgram(
+      "pulumi.program.bucket",
+      "aws_s3_bucket",
+      { properties: { acl: "public-read" } },
+      publicAcl.index,
+      "acl",
+    );
+  }
+  for (const match of searchable.matchAll(
+    /actions?\s*[:=]\s*(?:\[\s*)?["']\*["']/gi,
+  )) {
+    const offset = match.index ?? 0;
+    const before = searchable.slice(Math.max(0, offset - 300), offset);
+    const effects = [
+      ...before.matchAll(/(?:effect|Effect)\s*[:=]\s*["']?(Allow|Deny)["']?/gi),
+    ];
+    const nearest = effects.at(-1)?.[1] ?? "";
+    if (!/^allow$/i.test(nearest)) continue;
+    addProgram(
+      "pulumi.program.policy",
+      "pulumi:program/iam:Policy",
+      { properties: { effect: "Allow", actions: ["*"] } },
+      offset,
+      "actions",
+    );
+    break;
+  }
+  addProgram(
+    "pulumi.program.source",
+    "pulumi:program/source:Source",
+    { program: searchable },
+    0,
+    "program",
+  );
   return {
     format: "pulumi",
     resources,
     warnings: [
       "Pulumi programs are scanned as text. Computed values, stacks, and external modules are not evaluated.",
-      ...(resources.length
-        ? []
-        : ["No literal ingress CIDRs were found in the Pulumi program."]),
+      "Database, storage, IAM, credential, and network checks use literal settings in the submitted program.",
     ],
   };
 }
