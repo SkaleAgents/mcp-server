@@ -77,6 +77,40 @@ describe("architectureFindings", () => {
     );
   });
 
+  it("flags disabled timeouts, a one-connection pool, and unbounded retries", () => {
+    const findings = architectureFindings(
+      "timeout: 0\npool_size = 1\nmaxRetries: -1\n",
+      "reliability",
+    );
+    const timeout = findings.find(
+      (f) => f.title === "Outbound call has no timeout",
+    );
+    assert.equal(timeout?.severity, "medium");
+    assert.equal(timeout?.category, "reliability");
+    assert.equal(timeout?.location?.line, 1);
+    assert.ok(
+      findings.some((f) => f.title === "Connection pool is capped at one"),
+    );
+    assert.ok(findings.some((f) => f.title === "Retry limit is unbounded"));
+    const safe = architectureFindings(
+      "timeout: 5000\nsetTimeout(fn, 0)\nAbortSignal.timeout(10000)\npool_size = 10\nmaxRetries: 3\n",
+      "reliability",
+    );
+    assert.ok(
+      !safe.some(
+        (f) =>
+          f.title === "Outbound call has no timeout" ||
+          f.title === "Connection pool is capped at one" ||
+          f.title === "Retry limit is unbounded",
+      ),
+    );
+    assert.ok(
+      !architectureFindings("timeout: 0\npool_size = 1", "security").some(
+        (f) => f.category === "reliability",
+      ),
+    );
+  });
+
   it("limits findings to the selected focus", () => {
     const findings = architectureFindings(
       "debug: true\n0.0.0.0/0",

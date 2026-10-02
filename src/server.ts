@@ -69,7 +69,7 @@ export function createServer(remote = false) {
     {
       title: "Review architecture",
       description:
-        "Review individual source snippets or parsed infrastructure for security, reliability, and cost risks. For a whole application or Next.js architecture consultation, use plan_architecture_review and review_application_architecture instead.",
+        "Review individual source snippets or parsed infrastructure for security, reliability, and cost risks. Application checks include infrastructure bottlenecks: a disabled timeout, a one-connection pool, and an unbounded retry limit. For a whole application or Next.js architecture consultation, use plan_architecture_review and review_application_architecture instead.",
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -130,6 +130,7 @@ export function createServer(remote = false) {
           truncated: findings.length > maxFindings,
           limitations: [
             "Application checks are text patterns, not a language-aware or runtime analysis. Findings do not establish that code is safe.",
+            "Infrastructure bottleneck checks cover a disabled timeout, a one-connection pool, and an unbounded retry limit.",
           ],
           botHints: await botHints,
         });

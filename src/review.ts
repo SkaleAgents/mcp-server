@@ -171,6 +171,45 @@ export function architectureFindings(
         "Detected an explicit compute size. Compare the selected size with observed utilization and set a review point for scale-up and scale-down decisions.",
     });
   }
+  if (
+    shouldInclude(focusValue, "reliability") &&
+    /(?:^|[^.\w])(?:timeout|read_timeout|connect_timeout|request_timeout|readTimeout|connectTimeout)\s*[:=]\s*(?:0|false|none)\b/i.test(
+      content,
+    )
+  ) {
+    findings.push({
+      severity: "medium",
+      title: "Outbound call has no timeout",
+      detail:
+        "A timeout is set to zero, false, or none. Set a finite timeout so a stalled dependency cannot hold the process open.",
+    });
+  }
+  if (
+    shouldInclude(focusValue, "reliability") &&
+    /(?:pool_size|max_connections|connectionLimit|maxPoolSize|maximumPoolSize|max_pool_size)\s*[:=]\s*1\b/.test(
+      content,
+    )
+  ) {
+    findings.push({
+      severity: "high",
+      title: "Connection pool is capped at one",
+      detail:
+        "The pool allows one connection. Concurrent requests will queue behind that single connection.",
+    });
+  }
+  if (
+    shouldInclude(focusValue, "reliability") &&
+    /(?:max_?retries|retry_?count|retries)\s*[:=]\s*(?:-1|Infinity)\b/i.test(
+      content,
+    )
+  ) {
+    findings.push({
+      severity: "medium",
+      title: "Retry limit is unbounded",
+      detail:
+        "Retries are set to unlimited. Cap retries and add backoff so a failing dependency cannot amplify load.",
+    });
+  }
   return findings.map((finding, index) => {
     if (index === 0) return finding;
     const matchers: Record<string, RegExp> = {
@@ -190,6 +229,12 @@ export function architectureFindings(
       "Debug mode enabled": /(?:debug|app_debug)\s*[:=]\s*["']?(?:true|1|yes)/i,
       "Compute sizing needs review":
         /(?:instance_type|machine_type|vm_size)\s*[:=]/i,
+      "Outbound call has no timeout":
+        /(?:^|[^.\w])(?:timeout|read_timeout|connect_timeout|request_timeout|readTimeout|connectTimeout)\s*[:=]\s*(?:0|false|none)\b/i,
+      "Connection pool is capped at one":
+        /(?:pool_size|max_connections|connectionLimit|maxPoolSize|maximumPoolSize|max_pool_size)\s*[:=]\s*1\b/,
+      "Retry limit is unbounded":
+        /(?:max_?retries|retry_?count|retries)\s*[:=]\s*(?:-1|Infinity)\b/i,
     };
     const pattern = matchers[finding.title];
     const matches = pattern
@@ -217,9 +262,13 @@ export function architectureFindings(
       ruleId: `APP${String(ruleIndex).padStart(3, "0")}`,
       category: (finding.title === "Compute sizing needs review"
         ? "cost"
-        : ["Debug mode enabled", "Unpinned container image"].includes(
-              finding.title,
-            )
+        : [
+              "Debug mode enabled",
+              "Unpinned container image",
+              "Outbound call has no timeout",
+              "Connection pool is capped at one",
+              "Retry limit is unbounded",
+            ].includes(finding.title)
           ? "reliability"
           : "security") as Finding["category"],
       remediation: finding.detail,
