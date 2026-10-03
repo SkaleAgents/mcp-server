@@ -8,7 +8,9 @@ export type IacFormat =
   | "pulumi"
   | "compose"
   | "dockerfile"
-  | "github";
+  | "github"
+  | "helm"
+  | "ansible";
 export type Path = (string | number)[];
 export type Location = { line: number; column: number; path: string };
 export type Resource = {
@@ -79,7 +81,9 @@ export function looksLikeIac(content: string): boolean {
     looksLikePulumiProgram(content) ||
     looksLikeCompose(content) ||
     looksLikeDockerfile(content) ||
-    looksLikeGithubWorkflow(content)
+    looksLikeGithubWorkflow(content) ||
+    looksLikeHelm(content) ||
+    looksLikeAnsible(content)
   );
 }
 
@@ -99,6 +103,25 @@ export function looksLikeDockerfile(content: string): boolean {
 
 function topLevelKey(content: string, name: string): boolean {
   return new RegExp(`^(?:"${name}"|'${name}'|${name})\\s*:`, "m").test(content);
+}
+
+function playbookShape(content: string): boolean {
+  if (topLevelKey(content, "hosts") && topLevelKey(content, "tasks")) return true;
+  return /^\s*-\s+hosts\s*:/m.test(content) && /^\s*tasks\s*:/m.test(content);
+}
+
+export function looksLikeAnsible(content: string): boolean {
+  if (looksLikeGithubWorkflow(content)) return false;
+  if (topLevelKey(content, "apiVersion") && topLevelKey(content, "kind"))
+    return false;
+  return playbookShape(content);
+}
+
+export function looksLikeHelm(content: string): boolean {
+  if (looksLikeGithubWorkflow(content) || looksLikeAnsible(content)) return false;
+  const visible = maskNonCode(content);
+  if (!visible.includes("{{")) return false;
+  return /^\s*(?:apiVersion|kind)\s*:/m.test(visible);
 }
 
 export function looksLikeGithubWorkflow(content: string): boolean {
@@ -139,6 +162,18 @@ export function parseIac(
     (requested === "auto" && looksLikeGithubWorkflow(content))
   ) {
     return parseGithubWorkflow(content);
+  }
+  if (
+    requested === "ansible" ||
+    (requested === "auto" && looksLikeAnsible(content))
+  ) {
+    return parseAnsible(content);
+  }
+  if (
+    requested === "helm" ||
+    (requested === "auto" && looksLikeHelm(content))
+  ) {
+    return parseHelm(content);
   }
   if (
     requested !== "terraform" &&
@@ -408,7 +443,7 @@ export function parseIac(
   }
   if (!format)
     throw new ScanInputError(
-      "No IaC document found. Choose Terraform, CloudFormation, Kubernetes, Pulumi, Docker Compose, a Dockerfile, or a GitHub Actions workflow.",
+      "No IaC document found. Choose Terraform, CloudFormation, Kubernetes, Pulumi, Docker Compose, a Dockerfile, a GitHub Actions workflow, a Helm template, or an Ansible playbook.",
     );
   if (!resources.length)
     warnings.push("No resources found in the submitted document.");
@@ -608,6 +643,36 @@ function runPipesToShell(text: string): boolean {
   );
 }
 
+function copySources(text: string): string[] | undefined {
+  if (!/^(?:COPY|ADD)\b/i.test(text)) return undefined;
+  const rest = text.replace(/^(?:COPY|ADD)\b/i, "").trim();
+  if (rest.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(rest);
+      if (!Array.isArray(parsed) || parsed.length < 2) return [];
+      return parsed.slice(0, -1).map((item) => String(item));
+    } catch {
+      return [];
+    }
+  }
+  const tokens: string[] = [];
+  for (const match of rest.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)) {
+    const token = match[1] ?? match[2] ?? match[3];
+    if (token.startsWith("--")) continue;
+    tokens.push(token);
+  }
+  if (tokens.length < 2) return [];
+  return tokens.slice(0, -1);
+}
+
+function sourceIsSecret(source: string): boolean {
+  const path = source.replace(/\\/g, "/").replace(/\/+$/, "");
+  const base = path.split("/").filter(Boolean).at(-1) ?? path;
+  if (base === ".env" || base === "id_rsa" || base === "id_ed25519") return true;
+  if (base.endsWith(".pem")) return true;
+  return base === "credentials";
+}
+
 function lineLocation(line: number, path: string): Location {
   return { line, column: 1, path };
 }
@@ -656,6 +721,16 @@ function parseDockerfile(content: string): ParsedIac {
       locate: () => lineLocation(instruction.line, "run"),
     });
   });
+  instructions.forEach((instruction, index) => {
+    const sources = copySources(instruction.text);
+    if (!sources) return;
+    resources.push({
+      id: `dockerfile.copy.${index + 1}`,
+      type: "dockerfile:copy",
+      value: { secret: sources.some(sourceIsSecret) },
+      locate: () => lineLocation(instruction.line, "copy"),
+    });
+  });
   return {
     format: "dockerfile",
     resources,
@@ -681,6 +756,17 @@ function workflowChecksOutHead(jobs: unknown): boolean {
     }
   }
   return false;
+}
+
+function runPrintsSecret(script: string): boolean {
+  const logical = script.replace(/\\\r?\n\s*/g, " ");
+  return logical.split(/\n/).some((line) => {
+    const code = line.replace(/(^|\s)#[^\n]*$/, "");
+    return (
+      /\b(?:echo|printf|print)\b/i.test(code) &&
+      /\$\{\{\s*secrets\./.test(code)
+    );
+  });
 }
 
 function permissionsAreBroad(
@@ -771,6 +857,16 @@ function parseGithubWorkflow(content: string): ParsedIac {
           locate: () => position(["jobs", jobName, "steps", index, "uses"]),
         });
       });
+      array(object(job).steps).forEach((step, index) => {
+        const run = object(step).run;
+        if (typeof run !== "string") return;
+        resources.push({
+          id: `jobs.${jobName}.steps.${index}.run`,
+          type: "github:run",
+          value: { printsSecret: runPrintsSecret(run) },
+          locate: () => position(["jobs", jobName, "steps", index, "run"]),
+        });
+      });
     }
   }
   if (!found)
@@ -825,4 +921,120 @@ function pulumiResourceMap(
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function maskNonCode(content: string): string {
+  const withoutBlockComments = content
+    .replace(/\{\{-?\s*\/\*[\s\S]*?\*\/\s*-?\}\}/g, (match) =>
+      match.replace(/[^\n]/g, " "),
+    )
+    .replace(/\{#[\s\S]*?#\}/g, (match) => match.replace(/[^\n]/g, " "));
+  return withoutBlockComments
+    .split("\n")
+    .map((line) => {
+      let out = "";
+      let templates = 0;
+      let quote: string | undefined;
+      for (let index = 0; index < line.length; index++) {
+        const char = line[index];
+        const next = line[index + 1];
+        if (quote) {
+          out += char;
+          if (char === quote && line[index - 1] !== "\\") quote = undefined;
+          continue;
+        }
+        if (templates === 0 && (char === '"' || char === "'")) {
+          quote = char;
+          out += char;
+          continue;
+        }
+        if (char === "{" && next === "{") {
+          templates += 1;
+          out += char;
+          continue;
+        }
+        if (char === "}" && next === "}" && templates > 0) {
+          templates -= 1;
+          out += char;
+          continue;
+        }
+        if (templates === 0 && char === "#") {
+          return out + " ".repeat(line.length - out.length);
+        }
+        out += char;
+      }
+      return out;
+    })
+    .join("\n");
+}
+
+function lineAt(content: string, index: number): number {
+  return content.slice(0, index).split("\n").length;
+}
+
+function firstLiteral(
+  content: string,
+  pattern: RegExp,
+): { present: boolean; line: number } {
+  const match = pattern.exec(content);
+  if (!match || match.index === undefined) return { present: false, line: 1 };
+  return { present: true, line: lineAt(content, match.index) };
+}
+
+function literalResource(
+  id: string,
+  type: string,
+  match: { present: boolean; line: number },
+  path: string,
+): Resource {
+  return {
+    id,
+    type,
+    value: { present: match.present },
+    locate: () => lineLocation(match.line, path),
+  };
+}
+
+const helmTemplateWarning =
+  "Helm templates are not executed. Only literal text outside comments is checked.";
+
+const ansibleFactsWarning =
+  "Ansible facts are not executed. Only literal text outside comments is checked.";
+
+function parseHelm(content: string): ParsedIac {
+  const visible = maskNonCode(content);
+  const privileged = firstLiteral(visible, /privileged\s*:\s*["']?true["']?\b/);
+  const hostNetwork = firstLiteral(visible, /hostNetwork\s*:\s*["']?true["']?\b/);
+  const latest = firstLiteral(visible, /:latest\b/);
+  const socket = firstLiteral(visible, /(?:hostPath|volumes?)\b[\s\S]{0,500}docker\.sock|docker\.sock[\s\S]{0,200}\b(?:hostPath|volumes?)\b/);
+  return {
+    format: "helm",
+    resources: [
+      literalResource("helm.privileged", "helm:privileged", privileged, "privileged"),
+      literalResource("helm.hostNetwork", "helm:hostNetwork", hostNetwork, "hostNetwork"),
+      literalResource("helm.image", "helm:image", latest, "image"),
+      literalResource("helm.socket", "helm:socket", socket, "volume"),
+    ],
+    warnings: [helmTemplateWarning],
+  };
+}
+
+function parseAnsible(content: string): ParsedIac {
+  const visible = maskNonCode(content);
+  const become = firstLiteral(
+    visible,
+    /(?:^|\n)\s*(?:-\s+)?become\s*:\s*["']?(?:true|yes)["']?(?=\s|$)/,
+  );
+  const cidr = firstLiteral(
+    visible,
+    /(?:cidr|source)\s*:\s*(?:\|\s*)?(?:\n\s*-\s*)?["']?0\.0\.0\.0\/0\b/,
+  );
+  return {
+    format: "ansible",
+    resources: [
+      literalResource("ansible.become", "ansible:become", become, "become"),
+      literalResource("ansible.cidr", "ansible:cidr", cidr, "cidr"),
+    ],
+    warnings: [ansibleFactsWarning],
+  };
 }

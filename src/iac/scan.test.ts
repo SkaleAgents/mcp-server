@@ -662,3 +662,258 @@ jobs:
     assert.equal(scan.findings.length, 0);
   });
 });
+
+describe("copied secret files", () => {
+  it("flags COPY and ADD of secret files", () => {
+    const scan = scanIac(
+      `FROM nginx:1.27
+USER nginx
+COPY .env /app/.env
+COPY id_rsa /root/.ssh/id_rsa
+COPY id_ed25519 /root/.ssh/id_ed25519
+ADD certs/app.pem /etc/ssl/app.pem
+COPY config/credentials /run/credentials
+COPY ["id_rsa", "/root/.ssh/id_rsa"]
+`,
+    );
+    const secrets = scan.findings.filter((finding) => finding.ruleId === "DF004");
+    assert.equal(secrets.length, 6);
+    assert.equal(secrets[0]?.title, "Secret file copied into the image");
+    assert.equal(secrets[0]?.severity, "high");
+    assert.equal(secrets[0]?.category, "security");
+    assert.equal(scan.findings.some((finding) => finding.ruleId === "DF001"), false);
+  });
+
+  it("clears COPY package.json and ignores comments", () => {
+    const scan = scanIac(
+      `FROM nginx:1.27
+USER nginx
+COPY package.json /app/package.json
+# COPY .env /app/.env
+# ADD id_rsa /root/.ssh/id_rsa
+`,
+    );
+    assert.equal(scan.format, "dockerfile");
+    assert.equal(scan.findings.some((finding) => finding.ruleId === "DF004"), false);
+    assert.equal(scan.findings.some((finding) => finding.ruleId === "DF001"), false);
+  });
+});
+
+describe("printed workflow secrets", () => {
+  it("flags a run script that echoes a secrets expression", () => {
+    const scan = scanIac(
+      `on: push
+jobs:
+  build:
+    steps:
+      - run: echo \${{ secrets.API_KEY }}
+`,
+    );
+    const printed = scan.findings.find((finding) => finding.ruleId === "GH004");
+    assert.equal(printed?.title, "Workflow prints a secret");
+    assert.equal(printed?.severity, "high");
+    assert.equal(printed?.category, "security");
+    assert.equal(scan.format, "github");
+  });
+
+  it("clears a normal echo and a secret that is only mapped into env", () => {
+    const hello = scanIac(
+      `on: push
+jobs:
+  build:
+    steps:
+      - run: echo "hello"
+`,
+    );
+    assert.equal(hello.findings.some((finding) => finding.ruleId === "GH004"), false);
+    const mapped = scanIac(
+      `on: push
+jobs:
+  build:
+    steps:
+      - name: build
+        env:
+          TOKEN: \${{ secrets.GITHUB_TOKEN }}
+        run: echo "hello"
+`,
+    );
+    assert.equal(mapped.format, "github");
+    assert.equal(mapped.findings.some((finding) => finding.ruleId === "GH004"), false);
+    assert.equal(mapped.findings.some((finding) => finding.ruleId === "GH001"), false);
+  });
+});
+
+const helmWarning =
+  "Helm templates are not executed. Only literal text outside comments is checked.";
+const ansibleWarning =
+  "Ansible facts are not executed. Only literal text outside comments is checked.";
+
+describe("Helm templates", () => {
+  it("flags privileged, hostNetwork, latest, and docker.sock outside comments", () => {
+    const scan = scanIac(
+      `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.name }}
+spec:
+  template:
+    spec:
+      hostNetwork: true
+      containers:
+        - name: app
+          image: nginx:latest
+          securityContext:
+            privileged: true
+      volumes:
+        - name: docker
+          hostPath:
+            path: /var/run/docker.sock
+`,
+      { format: "auto" },
+    );
+    assert.equal(scan.format, "helm");
+    assert.ok(scan.warnings.includes(helmWarning));
+    assert.equal(
+      scan.findings.find((finding) => finding.ruleId === "HELM001")?.title,
+      "Privileged container in a Helm template",
+    );
+    assert.equal(
+      scan.findings.find((finding) => finding.ruleId === "HELM001")?.severity,
+      "critical",
+    );
+    assert.equal(scan.findings.some((finding) => finding.ruleId === "HELM002"), true);
+    assert.equal(scan.findings.some((finding) => finding.ruleId === "HELM003"), true);
+    assert.equal(scan.findings.some((finding) => finding.ruleId === "HELM004"), true);
+    assert.equal(scanIac(
+      `apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Values.name }}
+spec:
+  containers:
+    - name: app
+      image: nginx:1.27
+      # privileged: true
+      # hostNetwork: true
+      # image: nginx:latest
+      # hostPath: /var/run/docker.sock
+`,
+    ).findings.filter((finding) => finding.ruleId.startsWith("HELM")).length, 0);
+  });
+
+  it("keeps a rendered manifest as kubernetes and clears a replicas-only template", () => {
+    const rendered = scanIac(
+      `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: app
+  template:
+    metadata:
+      labels:
+        app: app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.27
+`,
+      { format: "auto" },
+    );
+    assert.equal(rendered.format, "kubernetes");
+    const clear = scanIac(
+      `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.name }}
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.27
+`,
+    );
+    assert.equal(clear.format, "helm");
+    assert.equal(
+      clear.findings.filter((finding) => finding.ruleId.startsWith("HELM")).length,
+      0,
+    );
+    const commentedMarker = scanIac(
+      `apiVersion: apps/v1
+kind: ConfigMap
+metadata:
+  name: app
+# {{ .Values.unused }}
+data:
+  note: kept
+`,
+    );
+    assert.equal(commentedMarker.format, "kubernetes");
+  });
+});
+
+describe("Ansible playbooks", () => {
+  it("flags become true or yes and a public cidr outside comments", () => {
+    const scan = scanIac(
+      `- hosts: all
+  tasks:
+    - name: open
+      become: true
+      ansible.builtin.firewalld:
+        source: 0.0.0.0/0
+`,
+      { format: "auto" },
+    );
+    assert.equal(scan.format, "ansible");
+    assert.ok(scan.warnings.includes(ansibleWarning));
+    const root = scan.findings.find((finding) => finding.ruleId === "ANS001");
+    assert.equal(root?.title, "Ansible task runs as root");
+    assert.equal(root?.severity, "high");
+    assert.equal(root?.category, "security");
+    const exposure = scan.findings.find((finding) => finding.ruleId === "ANS002");
+    assert.equal(exposure?.title, "Broad network exposure");
+    assert.equal(exposure?.severity, "high");
+    const play = scanIac(
+      `hosts: all
+become: yes
+tasks:
+  - name: show
+    ansible.builtin.debug:
+      msg: hi
+`,
+    );
+    assert.equal(play.format, "ansible");
+    assert.equal(play.findings.filter((finding) => finding.ruleId === "ANS001").length, 1);
+    const commented = scanIac(
+      `- hosts: all
+  tasks:
+    - name: note
+      ansible.builtin.debug:
+        msg: ok
+  # source: 0.0.0.0/0
+  # become: true
+`,
+    );
+    assert.equal(commented.findings.length, 0);
+  });
+
+  it("clears a play with become false and no public cidr", () => {
+    const scan = scanIac(
+      `- hosts: web
+  become: false
+  tasks:
+    - name: ping
+      ansible.builtin.ping:
+`,
+      { format: "ansible" },
+    );
+    assert.equal(scan.format, "ansible");
+    assert.equal(scan.findings.length, 0);
+    assert.ok(scan.warnings.includes(ansibleWarning));
+  });
+});
