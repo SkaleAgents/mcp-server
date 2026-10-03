@@ -1,6 +1,6 @@
 {
   "name": "@skaleagents/swarm",
-  "version": "0.6.7",
+  "version": "0.6.8",
   "private": false,
   "publishConfig": {
     "access": "public"
@@ -15,6 +15,10 @@
     "./scan": {
       "types": "./dist/iac/scan.d.ts",
       "import": "./dist/iac/scan.js"
+    },
+    "./review": {
+      "types": "./dist/review.d.ts",
+      "import": "./dist/review.js"
     }
   },
   "bin": {
