@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { scanIac } from "./scan.js";
-import { looksLikeIac, ScanInputError } from "./parse.js";
+import {
+  looksLikeDockerfile,
+  looksLikeGithubWorkflow,
+  looksLikeIac,
+  ScanInputError,
+} from "./parse.js";
 
 describe("Terraform scanning", () => {
   it("parses resource blocks, ignores comments and strings, and distinguishes egress", () => {
@@ -442,5 +447,218 @@ sg = aws.ec2.SecurityGroup("web", ingress=[{"cidr_blocks": ["0.0.0.0/0"]}])
         ),
       ScanInputError,
     );
+  });
+});
+
+const textWarning =
+  "The scan reads the submitted text and does not execute the image or the workflow.";
+
+describe("Dockerfile scanning", () => {
+  it("flags a root user, an unpinned image, and a remote script piped to a shell", () => {
+    const scan = scanIac(
+      `FROM nginx:latest
+USER root
+RUN curl -fsSL https://example.com/install.sh | bash
+`,
+      { format: "auto" },
+    );
+    assert.equal(scan.format, "dockerfile");
+    assert.equal(looksLikeDockerfile("FROM nginx:latest\n"), true);
+    assert.equal(looksLikeIac("FROM nginx:latest\n"), true);
+    assert.ok(scan.warnings.includes(textWarning));
+    const root = scan.findings.find((finding) => finding.ruleId === "DF001");
+    const image = scan.findings.find((finding) => finding.ruleId === "DF002");
+    const piped = scan.findings.find((finding) => finding.ruleId === "DF003");
+    assert.equal(root?.title, "Dockerfile runs as root");
+    assert.equal(root?.category, "security");
+    assert.equal(root?.severity, "high");
+    assert.equal(image?.title, "Unpinned container image");
+    assert.equal(image?.severity, "medium");
+    assert.equal(piped?.title, "Remote script piped to a shell");
+    assert.equal(piped?.severity, "high");
+    assert.equal(scan.findings.some((finding) => finding.ruleId === "SEC001"), false);
+    assert.equal(scan.rulesEvaluated.includes("NET001"), false);
+  });
+
+  it("treats a missing USER, uid 0, wget piped to sh, and an untagged image as findings", () => {
+    const missingUser = scanIac("FROM nginx\nRUN wget -qO- https://example.com/install.sh | sh\n");
+    assert.equal(missingUser.findings.filter((finding) => finding.ruleId === "DF001").length, 1);
+    assert.equal(missingUser.findings.filter((finding) => finding.ruleId === "DF002").length, 1);
+    assert.equal(missingUser.findings.filter((finding) => finding.ruleId === "DF003").length, 1);
+    const uid = scanIac("FROM node:20-alpine\nUSER 0\n");
+    assert.equal(uid.findings.filter((finding) => finding.ruleId === "DF001").length, 1);
+    assert.equal(uid.findings.some((finding) => finding.ruleId === "DF002"), false);
+  });
+
+  it("clears a non-root user, a pinned tag, scratch, named stages, and a normal install", () => {
+    const clear = scanIac(
+      `FROM node:20-alpine AS build
+FROM build
+FROM scratch
+FROM \${stage}
+USER node
+RUN npm ci
+RUN curl -fsSL https://example.com/archive.tgz -o archive.tgz
+`,
+    );
+    assert.equal(clear.format, "dockerfile");
+    assert.equal(clear.findings.some((finding) => finding.ruleId === "DF001"), false);
+    assert.equal(clear.findings.some((finding) => finding.ruleId === "DF002"), false);
+    assert.equal(clear.findings.some((finding) => finding.ruleId === "DF003"), false);
+    const finalNonRoot = scanIac("FROM nginx:latest\nUSER root\nUSER node\n");
+    assert.equal(finalNonRoot.findings.some((finding) => finding.ruleId === "DF001"), false);
+    assert.equal(finalNonRoot.findings.some((finding) => finding.ruleId === "DF002"), true);
+  });
+
+  it("does not classify a Dockerfile as Terraform, even when a line looks like HCL", () => {
+    const content = `FROM nginx:latest
+RUN echo 'resource "aws_s3_bucket" "logs" {'
+`;
+    assert.equal(scanIac(content, { format: "auto" }).format, "dockerfile");
+    assert.equal(scanIac(content, { format: "terraform" }).format, "dockerfile");
+    assert.doesNotThrow(() =>
+      scanIac("FROM nginx:latest\nRUN [echo\n", { format: "auto" }),
+    );
+  });
+});
+
+describe("GitHub Actions scanning", () => {
+  it("flags pull_request_target checkout of the PR head, broad permissions, and floating refs", () => {
+    const checkout = scanIac(
+      `on:
+  pull_request_target:
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+`,
+      { format: "auto" },
+    );
+    assert.equal(checkout.format, "github");
+    assert.equal(
+      looksLikeGithubWorkflow("on:\n  pull_request_target:\njobs:\n  build:\n    steps: []\n"),
+      true,
+    );
+    const quoted = `"on":\n  pull_request_target:\njobs:\n  test:\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          sha: \${{ github.event.pull_request.head.ref }}\n`;
+    assert.equal(looksLikeGithubWorkflow(quoted), true);
+    assert.equal(scanIac(quoted).format, "github");
+    const head = checkout.findings.find((finding) => finding.ruleId === "GH001");
+    assert.equal(head?.title, "Pull request target checks out PR code");
+    assert.equal(head?.severity, "critical");
+    assert.equal(head?.category, "security");
+    assert.ok(checkout.warnings.includes(textWarning));
+    const quotedScan = scanIac(quoted);
+    assert.equal(quotedScan.findings.filter((finding) => finding.ruleId === "GH001").length, 1);
+
+    const broad = scanIac(
+      `on: push
+permissions: write-all
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@main
+      - uses: owner/action@master
+`,
+    );
+    assert.equal(broad.findings.filter((finding) => finding.ruleId === "GH002").length, 1);
+    assert.equal(broad.findings.find((finding) => finding.ruleId === "GH002")?.title, "Workflow permissions are broad");
+    assert.equal(broad.findings.find((finding) => finding.ruleId === "GH002")?.severity, "high");
+    assert.equal(broad.findings.filter((finding) => finding.ruleId === "GH003").length, 2);
+    assert.equal(broad.findings.find((finding) => finding.ruleId === "GH003")?.title, "Action ref is a floating branch");
+    assert.equal(broad.findings.find((finding) => finding.ruleId === "GH003")?.severity, "medium");
+    assert.equal(broad.findings.some((finding) => finding.ruleId === "GH001"), false);
+
+    const contents = scanIac(
+      `on:
+  pull_request_target:
+permissions:
+  contents: write
+jobs:
+  build:
+    steps:
+      - run: echo hi
+`,
+    );
+    assert.equal(contents.findings.filter((finding) => finding.ruleId === "GH002").length, 1);
+    assert.equal(contents.findings.some((finding) => finding.ruleId === "GH001"), false);
+  });
+
+  it("clears a push workflow with read permissions, a release tag, and a commit SHA", () => {
+    const scan = scanIac(
+      `on: push
+permissions:
+  contents: read
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567
+`,
+    );
+    assert.equal(scan.format, "github");
+    assert.equal(scan.findings.length, 0);
+    assert.ok(scan.warnings.includes(textWarning));
+    const pushCheckout = scanIac(
+      `on: push
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+`,
+    );
+    assert.equal(pushCheckout.findings.some((finding) => finding.ruleId === "GH001"), false);
+  });
+});
+
+describe("format detection regressions", () => {
+  it("keeps a Compose file with services and image as compose", () => {
+    const scan = scanIac(
+      `services:
+  web:
+    image: nginx:1.27
+`,
+      { format: "auto" },
+    );
+    assert.equal(scan.format, "compose");
+    assert.equal(looksLikeGithubWorkflow("services:\n  web:\n    image: nginx\n"), false);
+  });
+
+  it("keeps a Kubernetes manifest as kubernetes", () => {
+    const scan = scanIac(
+      `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app
+data:
+  note: "on: push"
+`,
+      { format: "auto" },
+    );
+    assert.equal(scan.format, "kubernetes");
+    assert.equal(
+      looksLikeGithubWorkflow("apiVersion: v1\nkind: ConfigMap\non: push\njobs: {}\n"),
+      false,
+    );
+  });
+
+  it("scans a workflow that also declares job services as GitHub Actions", () => {
+    const scan = scanIac(
+      `on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgres:16
+    steps:
+      - uses: actions/checkout@v4
+`,
+    );
+    assert.equal(scan.format, "github");
+    assert.equal(scan.findings.length, 0);
   });
 });

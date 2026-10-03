@@ -240,6 +240,57 @@ export const rules: Record<string, Rule> = {
     remediation:
       "Scope the role to the required API groups, resource names, and verbs.",
   },
+  DF001: {
+    category: "security",
+    severity: "high",
+    title: "Dockerfile runs as root",
+    detail:
+      "The last USER is root or 0, or the Dockerfile has no USER instruction.",
+    remediation:
+      "Add a final USER instruction for a non-root account that the image supports.",
+  },
+  DF002: {
+    category: "security",
+    severity: "medium",
+    title: "Unpinned container image",
+    detail: "A FROM image uses the latest tag, or it has no tag and no digest.",
+    remediation:
+      "Pin a release tag or an image digest. Scratch and named stages are not image pins.",
+  },
+  DF003: {
+    category: "security",
+    severity: "high",
+    title: "Remote script piped to a shell",
+    detail:
+      "A RUN instruction downloads a script with curl or wget and pipes it to sh or bash.",
+    remediation:
+      "Download the script, review it, and pin a checksum before running it. Do not pipe a remote script to a shell.",
+  },
+  GH001: {
+    category: "security",
+    severity: "critical",
+    title: "Pull request target checks out PR code",
+    detail:
+      "The workflow triggers on pull_request_target and checks out the pull request head ref or head sha.",
+    remediation:
+      "Avoid checking out pull request head code from pull_request_target. Use pull_request for untrusted code, or check out the base repository only.",
+  },
+  GH002: {
+    category: "security",
+    severity: "high",
+    title: "Workflow permissions are broad",
+    detail:
+      "permissions is write-all, or a pull_request_target workflow sets contents to write.",
+    remediation:
+      "Set the narrowest permissions the workflow needs. Keep contents read-only on pull_request_target.",
+  },
+  GH003: {
+    category: "security",
+    severity: "medium",
+    title: "Action ref is a floating branch",
+    detail: "A uses value is pinned to @main or @master.",
+    remediation: "Pin the action to a release tag or a full commit SHA.",
+  },
 };
 
 export function resourceFindings(
@@ -259,6 +310,14 @@ export function resourceFindings(
           location: resource.locate(path),
         });
     };
+    if (format === "dockerfile") {
+      checkDockerfile(resource, check);
+      continue;
+    }
+    if (format === "github") {
+      checkGithub(resource, check);
+      continue;
+    }
     walk(resource.value, (key, value, path, parent) => {
       if (typeof value !== "string") return;
       const credentialName =
@@ -292,6 +351,29 @@ export function resourceFindings(
 }
 
 type Check = (id: string, condition: unknown, path?: Path) => void;
+
+function checkDockerfile(resource: Resource, check: Check): void {
+  if (resource.type === "dockerfile:user")
+    check("DF001", resource.value.root === true, ["user"]);
+  else if (resource.type === "dockerfile:from")
+    check("DF002", resource.value.unpinned === true, ["image"]);
+  else if (resource.type === "dockerfile:run")
+    check("DF003", resource.value.piped === true, ["run"]);
+}
+
+function checkGithub(resource: Resource, check: Check): void {
+  if (resource.type === "github:trigger")
+    check(
+      "GH001",
+      resource.value.pullRequestTarget === true &&
+        resource.value.checksOutHead === true,
+      ["on"],
+    );
+  else if (resource.type === "github:permissions")
+    check("GH002", resource.value.broad === true, ["permissions"]);
+  else if (resource.type === "github:action")
+    check("GH003", resource.value.floating === true, ["uses"]);
+}
 
 function walk(
   value: unknown,
