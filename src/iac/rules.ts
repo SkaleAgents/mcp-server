@@ -291,6 +291,70 @@ export const rules: Record<string, Rule> = {
     detail: "A uses value is pinned to @main or @master.",
     remediation: "Pin the action to a release tag or a full commit SHA.",
   },
+  DF004: {
+    category: "security",
+    severity: "high",
+    title: "Secret file copied into the image",
+    detail:
+      "A COPY or ADD instruction uses a secret file as a source.",
+    remediation:
+      "Keep secret files out of the image. Mount them at runtime from a secret store.",
+  },
+  GH004: {
+    category: "security",
+    severity: "high",
+    title: "Workflow prints a secret",
+    detail: "A run script echoes or prints a secrets expression.",
+    remediation:
+      "Remove the printed secret from the script. Pass secrets through an environment variable that the step does not print.",
+  },
+  HELM001: {
+    category: "security",
+    severity: "critical",
+    title: "Privileged container in a Helm template",
+    detail: "The template sets privileged to true.",
+    remediation:
+      "Set privileged to false. Isolate workloads that genuinely require elevated privileges.",
+  },
+  HELM002: {
+    category: "security",
+    severity: "high",
+    title: "Host network in a Helm template",
+    detail: "The template sets hostNetwork to true.",
+    remediation:
+      "Disable hostNetwork unless a reviewed node-level component requires it.",
+  },
+  HELM003: {
+    category: "reliability",
+    severity: "medium",
+    title: "Unpinned image in a Helm template",
+    detail: "An image tag uses latest.",
+    remediation: "Pin an immutable digest or a release tag.",
+  },
+  HELM004: {
+    category: "security",
+    severity: "high",
+    title: "Docker socket mounted in a Helm template",
+    detail: "A hostPath or volume contains docker.sock.",
+    remediation:
+      "Remove the Docker socket mount. Use a scoped volume or a reviewed runtime API instead.",
+  },
+  ANS001: {
+    category: "security",
+    severity: "high",
+    title: "Ansible task runs as root",
+    detail: "A play or task sets become to true or yes.",
+    remediation:
+      "Set become to false unless the task has a reviewed need to run as root.",
+  },
+  ANS002: {
+    category: "security",
+    severity: "high",
+    title: "Broad network exposure",
+    detail: "A cidr or source allows 0.0.0.0/0.",
+    remediation:
+      "Restrict the cidr or source to approved addresses.",
+  },
 };
 
 export function resourceFindings(
@@ -316,6 +380,14 @@ export function resourceFindings(
     }
     if (format === "github") {
       checkGithub(resource, check);
+      continue;
+    }
+    if (format === "helm") {
+      checkHelm(resource, check);
+      continue;
+    }
+    if (format === "ansible") {
+      checkAnsible(resource, check);
       continue;
     }
     walk(resource.value, (key, value, path, parent) => {
@@ -359,6 +431,8 @@ function checkDockerfile(resource: Resource, check: Check): void {
     check("DF002", resource.value.unpinned === true, ["image"]);
   else if (resource.type === "dockerfile:run")
     check("DF003", resource.value.piped === true, ["run"]);
+  else if (resource.type === "dockerfile:copy")
+    check("DF004", resource.value.secret === true, ["copy"]);
 }
 
 function checkGithub(resource: Resource, check: Check): void {
@@ -373,6 +447,26 @@ function checkGithub(resource: Resource, check: Check): void {
     check("GH002", resource.value.broad === true, ["permissions"]);
   else if (resource.type === "github:action")
     check("GH003", resource.value.floating === true, ["uses"]);
+  else if (resource.type === "github:run")
+    check("GH004", resource.value.printsSecret === true, ["run"]);
+}
+
+function checkHelm(resource: Resource, check: Check): void {
+  if (resource.type === "helm:privileged")
+    check("HELM001", resource.value.present === true, ["privileged"]);
+  else if (resource.type === "helm:hostNetwork")
+    check("HELM002", resource.value.present === true, ["hostNetwork"]);
+  else if (resource.type === "helm:image")
+    check("HELM003", resource.value.present === true, ["image"]);
+  else if (resource.type === "helm:socket")
+    check("HELM004", resource.value.present === true, ["volume"]);
+}
+
+function checkAnsible(resource: Resource, check: Check): void {
+  if (resource.type === "ansible:become")
+    check("ANS001", resource.value.present === true, ["become"]);
+  else if (resource.type === "ansible:cidr")
+    check("ANS002", resource.value.present === true, ["cidr"]);
 }
 
 function walk(
