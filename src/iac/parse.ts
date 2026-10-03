@@ -6,7 +6,9 @@ export type IacFormat =
   | "cloudformation"
   | "kubernetes"
   | "pulumi"
-  | "compose";
+  | "compose"
+  | "dockerfile"
+  | "github";
 export type Path = (string | number)[];
 export type Location = { line: number; column: number; path: string };
 export type Resource = {
@@ -75,7 +77,9 @@ export function looksLikeIac(content: string): boolean {
     ) ||
     looksLikePulumiYaml(content) ||
     looksLikePulumiProgram(content) ||
-    looksLikeCompose(content)
+    looksLikeCompose(content) ||
+    looksLikeDockerfile(content) ||
+    looksLikeGithubWorkflow(content)
   );
 }
 
@@ -87,6 +91,26 @@ export function looksLikePulumiProgram(content: string): boolean {
 
 export function looksLikeCompose(content: string): boolean {
   return /^\s*services\s*:/m.test(content) && /^\s+image\s*:/m.test(content);
+}
+
+export function looksLikeDockerfile(content: string): boolean {
+  return /^\s*FROM\s+\S+/m.test(content);
+}
+
+function topLevelKey(content: string, name: string): boolean {
+  return new RegExp(`^(?:"${name}"|'${name}'|${name})\\s*:`, "m").test(content);
+}
+
+export function looksLikeGithubWorkflow(content: string): boolean {
+  if (topLevelKey(content, "apiVersion") || topLevelKey(content, "kind"))
+    return false;
+  const topOn = topLevelKey(content, "on");
+  const composeOnly =
+    topLevelKey(content, "services") &&
+    /^\s+image\s*:/m.test(content) &&
+    !topOn;
+  if (composeOnly) return false;
+  return topOn && topLevelKey(content, "jobs");
 }
 
 export function looksLikePulumiYaml(content: string): boolean {
@@ -102,6 +126,20 @@ export function parseIac(
 ): ParsedIac {
   if (!content.trim())
     throw new ScanInputError("Content must not be empty or whitespace.");
+  // Detect these before HCL or a failing YAML parse so a Dockerfile is not classified as Terraform.
+  if (
+    requested === "dockerfile" ||
+    ((requested === "auto" || requested === "terraform") &&
+      looksLikeDockerfile(content))
+  ) {
+    return parseDockerfile(content);
+  }
+  if (
+    requested === "github" ||
+    (requested === "auto" && looksLikeGithubWorkflow(content))
+  ) {
+    return parseGithubWorkflow(content);
+  }
   if (
     requested !== "terraform" &&
     requested !== "compose" &&
@@ -370,7 +408,7 @@ export function parseIac(
   }
   if (!format)
     throw new ScanInputError(
-      "No IaC document found. Choose Terraform, CloudFormation, Kubernetes, Pulumi, or Docker Compose.",
+      "No IaC document found. Choose Terraform, CloudFormation, Kubernetes, Pulumi, Docker Compose, a Dockerfile, or a GitHub Actions workflow.",
     );
   if (!resources.length)
     warnings.push("No resources found in the submitted document.");
@@ -491,6 +529,258 @@ function parsePulumiProgram(content: string): ParsedIac {
       "Pulumi programs are scanned as text. Computed values, stacks, and external modules are not evaluated.",
       "Database, storage, IAM, credential, and network checks use literal settings in the submitted program.",
     ],
+  };
+}
+
+const submittedTextWarning =
+  "The scan reads the submitted text and does not execute the image or the workflow.";
+
+function logicalDockerfileLines(content: string): { line: number; text: string }[] {
+  const raw = content.split(/\r?\n/);
+  const lines: { line: number; text: string }[] = [];
+  let buffer = "";
+  let start = 1;
+  for (let index = 0; index < raw.length; index++) {
+    const current = raw[index].replace(/\s+$/, "");
+    if (!buffer) start = index + 1;
+    if (current.endsWith("\\")) {
+      buffer += `${current.slice(0, -1)} `;
+      continue;
+    }
+    buffer += current;
+    const text = buffer.trim();
+    buffer = "";
+    if (!text || text.startsWith("#")) continue;
+    lines.push({ line: start, text });
+  }
+  return lines;
+}
+
+function parseFromInstruction(
+  text: string,
+): { image: string; stage?: string } | undefined {
+  if (!/^FROM\b/i.test(text)) return undefined;
+  const parts = text.split(/\s+/);
+  let index = 1;
+  while (index < parts.length && parts[index].startsWith("--")) {
+    if (!parts[index].includes("=")) index += 1;
+    index += 1;
+  }
+  const image = parts[index];
+  if (!image) return undefined;
+  const stage = /^as$/i.test(parts[index + 1] ?? "")
+    ? parts[index + 2]
+    : undefined;
+  return stage ? { image, stage } : { image };
+}
+
+function imageIsUnpinned(image: string, stages: Set<string>): boolean {
+  if (
+    image.includes("${") ||
+    image.includes("@") ||
+    stages.has(image) ||
+    stages.has(image.toLowerCase()) ||
+    image.toLowerCase() === "scratch"
+  )
+    return false;
+  const slash = image.lastIndexOf("/");
+  const colon = image.lastIndexOf(":");
+  if (colon <= slash) return true;
+  return image.slice(colon + 1) === "latest";
+}
+
+function parseUserName(text: string): string | undefined {
+  if (!/^USER\b/i.test(text)) return undefined;
+  const parts = text
+    .split(/\s+/)
+    .slice(1)
+    .filter((part) => part && !part.startsWith("--"));
+  const raw = parts[0];
+  if (!raw) return undefined;
+  return raw.replace(/^["']|["']$/g, "").split(":")[0];
+}
+
+function runPipesToShell(text: string): boolean {
+  return (
+    /^RUN\b/i.test(text) &&
+    /\b(?:curl|wget)\b/i.test(text) &&
+    /\|\s*(?:sudo\s+)?(?:\S*\/)?(?:ba)?sh\b/i.test(text)
+  );
+}
+
+function lineLocation(line: number, path: string): Location {
+  return { line, column: 1, path };
+}
+
+function parseDockerfile(content: string): ParsedIac {
+  const instructions = logicalDockerfileLines(content);
+  const froms = instructions.flatMap((instruction) => {
+    const parsed = parseFromInstruction(instruction.text);
+    return parsed ? [{ ...instruction, ...parsed }] : [];
+  });
+  if (!froms.length)
+    throw new ScanInputError("A Dockerfile requires a FROM instruction.");
+  const stages = new Set<string>();
+  const resources: Resource[] = [];
+  froms.forEach((from, index) => {
+    resources.push({
+      id: `dockerfile.from.${index + 1}`,
+      type: "dockerfile:from",
+      value: { image: from.image, unpinned: imageIsUnpinned(from.image, stages) },
+      locate: () => lineLocation(from.line, "image"),
+    });
+    if (from.stage) {
+      stages.add(from.stage);
+      stages.add(from.stage.toLowerCase());
+    }
+  });
+  let lastUser: { line: number; name: string } | undefined;
+  for (const instruction of instructions) {
+    const name = parseUserName(instruction.text);
+    if (name !== undefined) lastUser = { line: instruction.line, name };
+  }
+  const root =
+    !lastUser || lastUser.name.toLowerCase() === "root" || lastUser.name === "0";
+  resources.push({
+    id: "dockerfile.user",
+    type: "dockerfile:user",
+    value: { user: lastUser?.name ?? "", root },
+    locate: () => lineLocation(lastUser?.line ?? froms[0].line, "user"),
+  });
+  instructions.forEach((instruction, index) => {
+    if (!/^RUN\b/i.test(instruction.text)) return;
+    resources.push({
+      id: `dockerfile.run.${index + 1}`,
+      type: "dockerfile:run",
+      value: { piped: runPipesToShell(instruction.text) },
+      locate: () => lineLocation(instruction.line, "run"),
+    });
+  });
+  return {
+    format: "dockerfile",
+    resources,
+    warnings: [submittedTextWarning],
+  };
+}
+
+function triggersPullRequestTarget(value: unknown): boolean {
+  if (value === "pull_request_target") return true;
+  if (Array.isArray(value))
+    return value.some((item) => item === "pull_request_target");
+  return Object.prototype.hasOwnProperty.call(object(value), "pull_request_target");
+}
+
+function workflowChecksOutHead(jobs: unknown): boolean {
+  for (const job of Object.values(object(jobs))) {
+    for (const step of array(object(job).steps)) {
+      const inputs = object(object(step).with);
+      const text = [inputs.ref, inputs.sha]
+        .filter((item) => typeof item === "string")
+        .join("\n");
+      if (text.includes("github.event.pull_request.head")) return true;
+    }
+  }
+  return false;
+}
+
+function permissionsAreBroad(
+  top: unknown,
+  jobs: unknown,
+  pullRequestTarget: boolean,
+): boolean {
+  const values = [
+    top,
+    ...Object.values(object(jobs)).map((job) => object(job).permissions),
+  ];
+  if (values.some((value) => value === "write-all")) return true;
+  if (!pullRequestTarget) return false;
+  return values.some((value) => object(value).contents === "write");
+}
+
+function parseGithubWorkflow(content: string): ParsedIac {
+  const lines = new LineCounter();
+  let documents;
+  try {
+    documents = parseAllDocuments(content, {
+      lineCounter: lines,
+      prettyErrors: false,
+    });
+  } catch {
+    throw new ScanInputError("Invalid GitHub Actions workflow YAML.");
+  }
+  const resources: Resource[] = [];
+  let found = false;
+  for (const [documentIndex, doc] of documents.entries()) {
+    if (doc.errors.length)
+      throw new ScanInputError("Invalid GitHub Actions workflow YAML.");
+    let data: unknown;
+    try {
+      data = doc.toJS({ maxAliasCount: 0 });
+    } catch {
+      throw new ScanInputError(
+        "YAML aliases are not supported. Expand anchors before scanning.",
+      );
+    }
+    if (data == null) continue;
+    checkShape(data);
+    const root = object(data);
+    if (!("on" in root) || !("jobs" in root)) continue;
+    found = true;
+    const pullRequestTarget = triggersPullRequestTarget(root.on);
+    const checksOutHead = workflowChecksOutHead(root.jobs);
+    const broad = permissionsAreBroad(
+      root.permissions,
+      root.jobs,
+      pullRequestTarget,
+    );
+    const position = (path: Path) => {
+      let node = doc.getIn(path, true) as { range?: number[] } | undefined;
+      if (!node?.range)
+        node = doc.getIn(["on"], true) as { range?: number[] } | undefined;
+      const at = lines.linePos(node?.range?.[0] ?? doc.range?.[0] ?? 0);
+      return {
+        line: at.line,
+        column: at.col,
+        path: [documentIndex, ...path].join("."),
+      };
+    };
+    resources.push({
+      id: "workflow.on",
+      type: "github:trigger",
+      value: { pullRequestTarget, checksOutHead },
+      locate: () => position(["on"]),
+    });
+    resources.push({
+      id: "workflow.permissions",
+      type: "github:permissions",
+      value: { broad },
+      locate: () =>
+        position(root.permissions != null ? ["permissions"] : ["on"]),
+    });
+    for (const [jobName, job] of Object.entries(object(root.jobs))) {
+      array(object(job).steps).forEach((step, index) => {
+        const uses = object(step).uses;
+        if (typeof uses !== "string") return;
+        const ref = uses.includes("@")
+          ? uses.slice(uses.lastIndexOf("@") + 1)
+          : "";
+        resources.push({
+          id: `jobs.${jobName}.steps.${index}`,
+          type: "github:action",
+          value: { uses, floating: ref === "main" || ref === "master" },
+          locate: () => position(["jobs", jobName, "steps", index, "uses"]),
+        });
+      });
+    }
+  }
+  if (!found)
+    throw new ScanInputError(
+      "A GitHub Actions workflow requires top-level on and jobs keys.",
+    );
+  return {
+    format: "github",
+    resources,
+    warnings: [submittedTextWarning],
   };
 }
 

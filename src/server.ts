@@ -88,13 +88,15 @@ export function createServer(remote = false) {
             "kubernetes",
             "pulumi",
             "compose",
+            "dockerfile",
+            "github",
             "application",
             "auto",
           ])
           .optional()
           .default("auto")
           .describe(
-            "Content format: terraform, cloudformation, kubernetes, pulumi, compose, application, auto",
+            "Content format: terraform, cloudformation, kubernetes, pulumi, compose, application, auto. Includes Dockerfile and GitHub Actions.",
           ),
       },
     },
@@ -153,7 +155,7 @@ export function createServer(remote = false) {
           (name === "scan_iac_stub"
             ? "Compatibility alias for scan_iac; runs the full scanner. "
             : "") +
-          "Parse Terraform HCL/JSON, CloudFormation YAML/JSON, Kubernetes manifests, Pulumi YAML, Pulumi programs, or Docker Compose. Check security, reliability and cost rules with resource locations and remediation. Pulumi programs are scanned as text.",
+          "Parse Terraform HCL/JSON, CloudFormation YAML/JSON, Kubernetes manifests, Pulumi YAML, Pulumi programs, or Docker Compose. Includes Dockerfile and GitHub Actions. Check security, reliability and cost rules with resource locations and remediation. Pulumi programs are scanned as text.",
         annotations: {
           readOnlyHint: true,
           destructiveHint: false,
@@ -162,7 +164,7 @@ export function createServer(remote = false) {
         _meta: { securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }] },
         inputSchema: {
           content: contentSchema.describe(
-            "Terraform HCL/JSON, CloudFormation YAML/JSON, Kubernetes YAML/JSON, Pulumi YAML or program text, or Docker Compose",
+            "Terraform HCL/JSON, CloudFormation YAML/JSON, Kubernetes YAML/JSON, Pulumi YAML or program text, or Docker Compose. Includes Dockerfile and GitHub Actions.",
           ),
           format: z
             .enum([
@@ -171,6 +173,8 @@ export function createServer(remote = false) {
               "kubernetes",
               "pulumi",
               "compose",
+              "dockerfile",
+              "github",
               "auto",
             ])
             .default("auto"),
