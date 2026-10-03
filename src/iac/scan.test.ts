@@ -917,3 +917,253 @@ tasks:
     assert.ok(scan.warnings.includes(ansibleWarning));
   });
 });
+
+describe("image and workflow secret assignment", () => {
+  it("flags a literal secret in Dockerfile ENV or ARG", () => {
+    const scan = scanIac(
+      `FROM nginx:1.27
+USER nginx
+ENV NODE_ENV=production
+ENV PATH=/usr/bin
+ARG VERSION=1
+ENV PASSWORD=hunter2
+ENV API_KEY=abcd
+ARG apikey=abcd
+ENV AUTH_TOKEN=abcd
+ENV ACCESS_KEY=abcd
+ENV PRIVATE_KEY=abcd
+ENV TOKEN=literal
+ENV SECRET=literal
+`,
+    );
+    const secrets = scan.findings.filter((finding) => finding.ruleId === "DF005");
+    assert.equal(secrets.length, 8);
+    assert.equal(secrets[0]?.title, "Secret assigned in an image variable");
+    assert.equal(secrets[0]?.severity, "high");
+    assert.equal(secrets[0]?.category, "security");
+    assert.equal(scan.findings.some((finding) => finding.ruleId === "DF001"), false);
+  });
+
+  it("clears safe image variables, shell references, and comments", () => {
+    const scan = scanIac(
+      `FROM nginx:1.27
+USER nginx
+ENV NODE_ENV=production
+ENV PATH=/usr/bin
+ARG VERSION=1
+ENV TOKEN=$TOKEN
+ENV TOKEN=\${TOKEN}
+ARG PASSWORD
+# ENV PASSWORD=hunter2
+# ARG TOKEN=literal
+`,
+    );
+    assert.equal(scan.format, "dockerfile");
+    assert.equal(scan.findings.some((finding) => finding.ruleId === "DF005"), false);
+  });
+
+  it("flags a literal workflow env value and keeps printed-secret checks", () => {
+    const scan = scanIac(
+      `on: push
+jobs:
+  build:
+    steps:
+      - env:
+          TOKEN: literal-secret
+          API_KEY: abcd
+        run: echo "hello"
+`,
+    );
+    const assigned = scan.findings.filter((finding) => finding.ruleId === "GH005");
+    assert.equal(assigned.length, 2);
+    assert.equal(assigned[0]?.title, "Secret assigned in workflow env");
+    assert.equal(assigned[0]?.severity, "high");
+    assert.equal(assigned[0]?.category, "security");
+    assert.equal(scan.findings.some((finding) => finding.ruleId === "GH004"), false);
+  });
+
+  it("clears secrets expressions, github.token, empty env, and a hello echo", () => {
+    const scan = scanIac(
+      `on: push
+env:
+  TOKEN: \${{ secrets.TOKEN }}
+jobs:
+  build:
+    env:
+      API_KEY: \${{ github.token }}
+      PASSWORD: ""
+    steps:
+      - run: echo "hello"
+`,
+    );
+    assert.equal(scan.format, "github");
+    assert.equal(scan.findings.some((finding) => finding.ruleId === "GH005"), false);
+    assert.equal(scan.findings.some((finding) => finding.ruleId === "GH004"), false);
+  });
+});
+
+const azureWarning = "Bicep modules and ARM expressions are not evaluated.";
+
+describe("Bicep and ARM templates", () => {
+  it("flags open source prefixes and public network access on Bicep resources", () => {
+    const scan = scanIac(
+      `resource store 'Microsoft.Storage/storageAccounts@2023-01-01' = {
+  name: 'store'
+  properties: {
+    publicNetworkAccess: 'Enabled'
+  }
+}
+resource nsg 'Microsoft.Network/networkSecurityGroups@2023-05-01' = {
+  properties: {
+    securityRules: [
+      {
+        name: 'open'
+        properties: {
+          direction: 'Inbound'
+          sourceAddressPrefix: '*'
+          destinationAddressPrefix: '0.0.0.0/0'
+        }
+      }
+    ]
+  }
+}
+`,
+      { format: "auto" },
+    );
+    assert.equal(scan.format, "bicep");
+    assert.ok(scan.warnings.includes(azureWarning));
+    const exposure = scan.findings.find((finding) => finding.ruleId === "AZ001");
+    const access = scan.findings.find((finding) => finding.ruleId === "AZ002");
+    assert.equal(exposure?.title, "Broad network exposure");
+    assert.equal(exposure?.severity, "high");
+    assert.equal(exposure?.category, "security");
+    assert.equal(access?.title, "Database or storage allows public network access");
+    assert.equal(access?.severity, "high");
+    assert.equal(access?.category, "security");
+  });
+
+  it("keeps a Terraform resource block as terraform", () => {
+    const scan = scanIac(
+      `resource "azurerm_storage_account" "example" {
+  name = "example"
+  public_network_access_enabled = true
+}
+`,
+    );
+    assert.equal(scan.format, "terraform");
+    assert.equal(scan.findings.some((finding) => finding.ruleId === "AZ002"), false);
+  });
+
+  it("clears egress destinations, disabled access, and comments", () => {
+    const scan = scanIac(
+      `resource nsg 'Microsoft.Network/networkSecurityGroups@2023-05-01' = {
+  properties: {
+    securityRules: [
+      {
+        properties: {
+          direction: 'Outbound'
+          destinationAddressPrefix: '*'
+          sourceAddressPrefix: '10.0.0.0/24'
+        }
+      }
+    ]
+  }
+}
+resource db 'Microsoft.Sql/servers@2021-11-01' = {
+  properties: {
+    publicNetworkAccess: 'Disabled'
+  }
+}
+// sourceAddressPrefix: '*'
+/* publicNetworkAccess: 'Enabled' */
+`,
+      { format: "bicep" },
+    );
+    assert.equal(scan.format, "bicep");
+    assert.equal(scan.findings.length, 0);
+    assert.ok(scan.warnings.includes(azureWarning));
+  });
+
+  it("detects an ARM template and does not steal Terraform JSON or CloudFormation", () => {
+    const arm = scanIac(
+      `{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "resources": [
+    {
+      "type": "Microsoft.Sql/servers",
+      "apiVersion": "2021-11-01",
+      "name": "db",
+      "properties": {
+        "publicNetworkAccess": "Enabled"
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2023-05-01",
+      "name": "nsg",
+      "properties": {
+        "securityRules": [
+          {
+            "properties": {
+              "direction": "Inbound",
+              "sourceAddressPrefixes": ["0.0.0.0/0"]
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
+`,
+    );
+    assert.equal(arm.format, "arm");
+    assert.ok(arm.warnings.includes(azureWarning));
+    assert.equal(
+      arm.findings.find((finding) => finding.ruleId === "AZ002")?.title,
+      "Database or storage allows public network access",
+    );
+    assert.equal(
+      arm.findings.find((finding) => finding.ruleId === "AZ001")?.title,
+      "Broad network exposure",
+    );
+    const byVersion = scanIac(
+      `{
+  "contentVersion": "1.0.0.0",
+  "resources": [
+    {
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2023-01-01",
+      "name": "store",
+      "properties": { "publicNetworkAccess": true }
+    }
+  ]
+}
+`,
+      { format: "arm" },
+    );
+    assert.equal(byVersion.format, "arm");
+    assert.equal(byVersion.findings.some((finding) => finding.ruleId === "AZ002"), true);
+    const terraform = scanIac(
+      `{
+  "resource": {
+    "aws_s3_bucket": {
+      "example": { "bucket": "example" }
+    }
+  }
+}
+`,
+    );
+    assert.equal(terraform.format, "terraform");
+    const cloudformation = scanIac(
+      `{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Bucket": { "Type": "AWS::S3::Bucket", "Properties": {} }
+  }
+}
+`,
+    );
+    assert.equal(cloudformation.format, "cloudformation");
+  });
+});

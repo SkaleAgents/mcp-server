@@ -92,13 +92,15 @@ export function createServer(remote = false) {
             "github",
             "helm",
             "ansible",
+            "bicep",
+            "arm",
             "application",
             "auto",
           ])
           .optional()
           .default("auto")
           .describe(
-            "Content format: terraform, cloudformation, kubernetes, pulumi, compose, dockerfile, github, helm, ansible, application, auto.",
+            "Content format: terraform, cloudformation, kubernetes, pulumi, compose, dockerfile, github, helm, ansible, bicep, arm, application, auto.",
           ),
       },
     },
@@ -157,7 +159,7 @@ export function createServer(remote = false) {
           (name === "scan_iac_stub"
             ? "Compatibility alias for scan_iac; runs the full scanner. "
             : "") +
-          "Parse Terraform HCL/JSON, CloudFormation YAML/JSON, Kubernetes manifests, Pulumi YAML, Pulumi programs, or Docker Compose. Includes Dockerfile, GitHub Actions, Helm templates, and Ansible playbooks. Helm templates and Ansible facts are not executed. Check security, reliability and cost rules with resource locations and remediation. Pulumi programs are scanned as text.",
+          "Parse Terraform HCL/JSON, CloudFormation YAML/JSON, Kubernetes manifests, Pulumi YAML, Pulumi programs, or Docker Compose. Includes Dockerfile, GitHub Actions, Helm templates, Ansible playbooks, Bicep files, and ARM templates. Helm templates, Ansible facts, Bicep modules, and ARM expressions are not executed. Check security, reliability and cost rules with resource locations and remediation. Pulumi programs are scanned as text.",
         annotations: {
           readOnlyHint: true,
           destructiveHint: false,
@@ -166,7 +168,7 @@ export function createServer(remote = false) {
         _meta: { securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }] },
         inputSchema: {
           content: contentSchema.describe(
-            "Terraform HCL/JSON, CloudFormation YAML/JSON, Kubernetes YAML/JSON, Pulumi YAML or program text, or Docker Compose. Includes Dockerfile, GitHub Actions, Helm templates, and Ansible playbooks.",
+            "Terraform HCL/JSON, CloudFormation YAML/JSON, Kubernetes YAML/JSON, Pulumi YAML or program text, or Docker Compose. Includes Dockerfile, GitHub Actions, Helm templates, Ansible playbooks, Bicep files, and ARM templates.",
           ),
           format: z
             .enum([
@@ -179,6 +181,8 @@ export function createServer(remote = false) {
               "github",
               "helm",
               "ansible",
+              "bicep",
+              "arm",
               "auto",
             ])
             .default("auto"),

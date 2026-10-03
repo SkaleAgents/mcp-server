@@ -62,7 +62,9 @@ review-brief builder.
 ## Infrastructure scanning
 
 `scan_iac` parses Terraform HCL/JSON, CloudFormation YAML/JSON, and Kubernetes
-manifests, including multi-document YAML and Kubernetes Lists. It returns a
+manifests, including multi-document YAML and Kubernetes Lists. It also reads
+Dockerfiles, GitHub Actions workflows, Helm templates, Ansible playbooks,
+Bicep files, and ARM templates. It returns a
 resource inventory and findings with stable rule IDs, severity, property paths,
 line locations, and remediation. Findings never include matched secret values.
 
