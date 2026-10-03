@@ -308,6 +308,42 @@ export const rules: Record<string, Rule> = {
     remediation:
       "Remove the printed secret from the script. Pass secrets through an environment variable that the step does not print.",
   },
+  DF005: {
+    category: "security",
+    severity: "high",
+    title: "Secret assigned in an image variable",
+    detail:
+      "A Dockerfile ENV or ARG assigns a non-empty literal to a secret-like name.",
+    remediation:
+      "Pass the value at runtime or from a secret mount. Do not bake a literal secret into ENV or ARG.",
+  },
+  GH005: {
+    category: "security",
+    severity: "high",
+    title: "Secret assigned in workflow env",
+    detail:
+      "A workflow env mapping assigns a non-empty literal to a secret-like name.",
+    remediation:
+      "Reference secrets or github.token in the env value. Do not commit a literal secret.",
+  },
+  AZ001: {
+    category: "security",
+    severity: "high",
+    title: "Broad network exposure",
+    detail:
+      "A source address prefix allows every address, or a destination prefix is open outside an egress scope.",
+    remediation:
+      "Restrict source address prefixes to approved ranges. Keep open destination prefixes on egress rules only.",
+  },
+  AZ002: {
+    category: "security",
+    severity: "high",
+    title: "Database or storage allows public network access",
+    detail:
+      "publicNetworkAccess is Enabled or true on a database, storage, or server resource.",
+    remediation:
+      "Set publicNetworkAccess to Disabled and reach the resource through a private endpoint.",
+  },
   HELM001: {
     category: "security",
     severity: "critical",
@@ -390,6 +426,10 @@ export function resourceFindings(
       checkAnsible(resource, check);
       continue;
     }
+    if (format === "bicep" || format === "arm") {
+      checkAzure(resource, check);
+      continue;
+    }
     walk(resource.value, (key, value, path, parent) => {
       if (typeof value !== "string") return;
       const credentialName =
@@ -433,6 +473,8 @@ function checkDockerfile(resource: Resource, check: Check): void {
     check("DF003", resource.value.piped === true, ["run"]);
   else if (resource.type === "dockerfile:copy")
     check("DF004", resource.value.secret === true, ["copy"]);
+  else if (resource.type === "dockerfile:env")
+    check("DF005", resource.value.literal === true, ["env"]);
 }
 
 function checkGithub(resource: Resource, check: Check): void {
@@ -449,6 +491,8 @@ function checkGithub(resource: Resource, check: Check): void {
     check("GH003", resource.value.floating === true, ["uses"]);
   else if (resource.type === "github:run")
     check("GH004", resource.value.printsSecret === true, ["run"]);
+  else if (resource.type === "github:env")
+    check("GH005", resource.value.literal === true, ["env"]);
 }
 
 function checkHelm(resource: Resource, check: Check): void {
@@ -467,6 +511,13 @@ function checkAnsible(resource: Resource, check: Check): void {
     check("ANS001", resource.value.present === true, ["become"]);
   else if (resource.type === "ansible:cidr")
     check("ANS002", resource.value.present === true, ["cidr"]);
+}
+
+function checkAzure(resource: Resource, check: Check): void {
+  if (resource.type === "azure:exposure")
+    check("AZ001", resource.value.present === true, ["sourceAddressPrefix"]);
+  else if (resource.type === "azure:publicNetwork")
+    check("AZ002", resource.value.present === true, ["publicNetworkAccess"]);
 }
 
 function walk(

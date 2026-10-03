@@ -10,7 +10,9 @@ export type IacFormat =
   | "dockerfile"
   | "github"
   | "helm"
-  | "ansible";
+  | "ansible"
+  | "bicep"
+  | "arm";
 export type Path = (string | number)[];
 export type Location = { line: number; column: number; path: string };
 export type Resource = {
@@ -83,7 +85,9 @@ export function looksLikeIac(content: string): boolean {
     looksLikeDockerfile(content) ||
     looksLikeGithubWorkflow(content) ||
     looksLikeHelm(content) ||
-    looksLikeAnsible(content)
+    looksLikeAnsible(content) ||
+    looksLikeBicep(content) ||
+    looksLikeArm(content)
   );
 }
 
@@ -136,6 +140,54 @@ export function looksLikeGithubWorkflow(content: string): boolean {
   return topOn && topLevelKey(content, "jobs");
 }
 
+export function looksLikeTerraformHcl(content: string): boolean {
+  return /^\s*(?:(?:resource|module|variable|provider|data|output)\s+"|(?:terraform|locals)\s*\{)/m.test(
+    content,
+  );
+}
+
+export function looksLikeBicep(content: string): boolean {
+  const visible = maskIaCComments(content);
+  if (looksLikeTerraformHcl(visible)) return false;
+  return /^\s*resource\s+[A-Za-z_][A-Za-z0-9_]*\s+['"]Microsoft\./m.test(visible);
+}
+
+export function looksLikeArm(content: string): boolean {
+  const visible = maskIaCComments(content).trim();
+  if (!visible.startsWith("{")) return false;
+  let value: unknown;
+  try {
+    value = JSON.parse(visible);
+  } catch {
+    return false;
+  }
+  const root = object(value);
+  if (typeof root.AWSTemplateFormatVersion === "string") return false;
+  if (
+    Object.values(object(root.Resources)).some((item) =>
+      String(object(item).Type ?? "").startsWith("AWS::"),
+    )
+  )
+    return false;
+  if ("resource" in root && !Array.isArray(root.resources)) return false;
+  if (
+    "format_version" in root ||
+    "planned_values" in root ||
+    "resource_changes" in root
+  )
+    return false;
+  if (
+    typeof root.$schema === "string" &&
+    root.$schema.includes("deploymentTemplate")
+  )
+    return true;
+  if (typeof root.contentVersion !== "string" || !Array.isArray(root.resources))
+    return false;
+  return root.resources.some((item) =>
+    String(object(item).type ?? "").startsWith("Microsoft."),
+  );
+}
+
 export function looksLikePulumiYaml(content: string): boolean {
   return (
     /^\s*resources\s*:/m.test(content) &&
@@ -175,6 +227,20 @@ export function parseIac(
   ) {
     return parseHelm(content);
   }
+  if (requested === "bicep" || (requested === "auto" && looksLikeBicep(content))) {
+    if (!looksLikeBicep(content))
+      throw new ScanInputError(
+        "A Bicep file requires a Microsoft resource declaration.",
+      );
+    return parseAzure(content, "bicep");
+  }
+  if (requested === "arm" || (requested === "auto" && looksLikeArm(content))) {
+    if (!looksLikeArm(content))
+      throw new ScanInputError(
+        "An ARM template requires a deploymentTemplate schema or contentVersion with Microsoft resources.",
+      );
+    return parseAzure(content, "arm");
+  }
   if (
     requested !== "terraform" &&
     requested !== "compose" &&
@@ -187,10 +253,7 @@ export function parseIac(
   const resources: Resource[] = [];
   const isHcl =
     (requested === "terraform" && !content.trimStart().startsWith("{")) ||
-    (requested === "auto" &&
-      /^\s*(?:(?:resource|module|variable|provider|data|output)\s+"|(?:terraform|locals)\s*\{)/m.test(
-        content,
-      ));
+    (requested === "auto" && looksLikeTerraformHcl(content));
   if (isHcl) {
     let data: unknown;
     try {
@@ -443,7 +506,7 @@ export function parseIac(
   }
   if (!format)
     throw new ScanInputError(
-      "No IaC document found. Choose Terraform, CloudFormation, Kubernetes, Pulumi, Docker Compose, a Dockerfile, a GitHub Actions workflow, a Helm template, or an Ansible playbook.",
+      "No IaC document found. Choose Terraform, CloudFormation, Kubernetes, Pulumi, Docker Compose, a Dockerfile, a GitHub Actions workflow, a Helm template, an Ansible playbook, Bicep, or an ARM template.",
     );
   if (!resources.length)
     warnings.push("No resources found in the submitted document.");
@@ -673,6 +736,63 @@ function sourceIsSecret(source: string): boolean {
   return base === "credentials";
 }
 
+function secretVariableName(name: string): boolean {
+  const normalized = name.replace(/-/g, "_");
+  return (
+    /(?:^|_)(?:password|passwd|secret|token)$/i.test(normalized) ||
+    /(?:^|_)(?:api_?key|auth_token|access_key|private_key)$/i.test(normalized)
+  );
+}
+
+function isShellReference(value: string): boolean {
+  return (
+    /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(value) ||
+    /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/.test(value)
+  );
+}
+
+function parseImageAssignments(
+  kind: "ENV" | "ARG",
+  rest: string,
+): { name: string; value: string }[] {
+  const trimmed = rest.trim();
+  if (!trimmed) return [];
+  if (kind === "ARG" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed))
+    return [{ name: trimmed, value: "" }];
+  if (!trimmed.includes("=")) {
+    const spaced = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+([\s\S]*)$/);
+    if (!spaced) return [];
+    return [{ name: spaced[1], value: unquoteAssignment(spaced[2].trim()) }];
+  }
+  const pairs: { name: string; value: string }[] = [];
+  const pattern =
+    /([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"]*)"|'([^']*)'|([^\s]*))/g;
+  for (const match of trimmed.matchAll(pattern)) {
+    pairs.push({
+      name: match[1],
+      value: match[2] ?? match[3] ?? match[4] ?? "",
+    });
+  }
+  return pairs;
+}
+
+function unquoteAssignment(value: string): string {
+  if (
+    (value.startsWith('"') && value.endsWith('"') && value.length >= 2) ||
+    (value.startsWith("'") && value.endsWith("'") && value.length >= 2)
+  )
+    return value.slice(1, -1);
+  return value;
+}
+
+function workflowEnvIsLiteral(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (/^\$\{\{\s*secrets\.[^}]+\}\}$/i.test(trimmed)) return false;
+  if (/^\$\{\{\s*github\.token\s*\}\}$/i.test(trimmed)) return false;
+  return true;
+}
+
 function lineLocation(line: number, path: string): Location {
   return { line, column: 1, path };
 }
@@ -729,6 +849,24 @@ function parseDockerfile(content: string): ParsedIac {
       type: "dockerfile:copy",
       value: { secret: sources.some(sourceIsSecret) },
       locate: () => lineLocation(instruction.line, "copy"),
+    });
+  });
+  instructions.forEach((instruction, index) => {
+    const header = instruction.text.match(/^(ENV|ARG)\b\s*([\s\S]*)$/i);
+    if (!header) return;
+    const kind = header[1].toUpperCase() === "ARG" ? "ARG" : "ENV";
+    const assignments = parseImageAssignments(kind, header[2] ?? "");
+    const literal = assignments.some(
+      (item) =>
+        secretVariableName(item.name) &&
+        item.value.trim() !== "" &&
+        !isShellReference(item.value.trim()),
+    );
+    resources.push({
+      id: `dockerfile.env.${index + 1}`,
+      type: "dockerfile:env",
+      value: { literal },
+      locate: () => lineLocation(instruction.line, "env"),
     });
   });
   return {
@@ -843,7 +981,25 @@ function parseGithubWorkflow(content: string): ParsedIac {
       locate: () =>
         position(root.permissions != null ? ["permissions"] : ["on"]),
     });
+    const addEnv = (envValue: unknown, path: Path) => {
+      for (const [key, raw] of Object.entries(object(envValue))) {
+        if (typeof raw !== "string" && raw != null) continue;
+        if (!secretVariableName(key)) continue;
+        const value = typeof raw === "string" ? raw : "";
+        resources.push({
+          id: `env.${[...path, key].join(".")}`,
+          type: "github:env",
+          value: { literal: workflowEnvIsLiteral(value) },
+          locate: () => position([...path, key]),
+        });
+      }
+    };
+    addEnv(root.env, ["env"]);
     for (const [jobName, job] of Object.entries(object(root.jobs))) {
+      addEnv(object(job).env, ["jobs", jobName, "env"]);
+      array(object(job).steps).forEach((step, index) => {
+        addEnv(object(step).env, ["jobs", jobName, "steps", index, "env"]);
+      });
       array(object(job).steps).forEach((step, index) => {
         const uses = object(step).uses;
         if (typeof uses !== "string") return;
@@ -1036,5 +1192,128 @@ function parseAnsible(content: string): ParsedIac {
       literalResource("ansible.cidr", "ansible:cidr", cidr, "cidr"),
     ],
     warnings: [ansibleFactsWarning],
+  };
+}
+
+function maskIaCComments(content: string): string {
+  const withoutBlock = content.replace(/\/\*[\s\S]*?\*\//g, (match) =>
+    match.replace(/[^\n]/g, " "),
+  );
+  return withoutBlock
+    .split("\n")
+    .map((line) => {
+      let out = "";
+      let quote: string | undefined;
+      for (let index = 0; index < line.length; index++) {
+        const char = line[index];
+        const next = line[index + 1];
+        if (quote) {
+          out += char;
+          if (char === "\\" && quote === '"') {
+            if (next) out += next;
+            index += 1;
+            continue;
+          }
+          if (char === quote) quote = undefined;
+          continue;
+        }
+        if (char === '"' || char === "'") {
+          quote = char;
+          out += char;
+          continue;
+        }
+        if (
+          (char === "/" && next === "/") ||
+          char === "#"
+        ) {
+          return out + " ".repeat(line.length - out.length);
+        }
+        out += char;
+      }
+      return out;
+    })
+    .join("\n");
+}
+
+function addressValueIsOpen(after: string): boolean {
+  return /(?:^|[\s\[,])(?:"\*"|"0\.0\.0\.0\/0"|'\*'|'0\.0\.0\.0\/0'|\*|0\.0\.0\.0\/0)(?=$|[\s,\]}"'])/.test(
+    after,
+  );
+}
+
+function nearestScopeIsEgress(content: string, index: number): boolean {
+  const windowStart = Math.max(0, index - 800);
+  const windowEnd = Math.min(content.length, index + 400);
+  const slice = content.slice(windowStart, windowEnd);
+  const relative = index - windowStart;
+  let nearest: { distance: number; egress: boolean } | undefined;
+  for (const match of slice.matchAll(/\b(Inbound|Outbound|ingress|egress)\b/gi)) {
+    const at = match.index ?? 0;
+    const distance = Math.abs(at - relative);
+    const egress = /^(?:outbound|egress)$/i.test(match[1] ?? "");
+    if (!nearest || distance < nearest.distance) nearest = { distance, egress };
+  }
+  return nearest?.egress ?? false;
+}
+
+function firstOpenAddress(content: string): { present: boolean; line: number } {
+  const pattern = /(source|destination)AddressPrefix(es)?["']?\s*[:=]/gi;
+  for (const match of content.matchAll(pattern)) {
+    const kind = (match[1] ?? "").toLowerCase();
+    const index = match.index ?? 0;
+    const after = content.slice(index + match[0].length, index + match[0].length + 240);
+    if (!addressValueIsOpen(after)) continue;
+    if (kind === "destination" && nearestScopeIsEgress(content, index)) continue;
+    return { present: true, line: lineAt(content, index) };
+  }
+  return { present: false, line: 1 };
+}
+
+function enclosingAzureType(content: string, index: number): string {
+  const before = content.slice(Math.max(0, index - 4000), index);
+  const declarations = [
+    ...before.matchAll(
+      /resource\s+[A-Za-z_][\w]*\s+['"](Microsoft\.[^'"]+)['"]|(?:["']type["']|type)\s*:\s*["'](Microsoft\.[^"']+)["']/g,
+    ),
+  ];
+  const last = declarations.at(-1);
+  return last?.[1] ?? last?.[2] ?? "";
+}
+
+function firstPublicNetwork(content: string): { present: boolean; line: number } {
+  const pattern =
+    /publicNetworkAccess["']?\s*[:=]\s*(["']?)(Enabled|true|Disabled|false)\1(?![\w.-])/gi;
+  for (const match of content.matchAll(pattern)) {
+    if (!/^(?:enabled|true)$/i.test(match[2] ?? "")) continue;
+    const index = match.index ?? 0;
+    const type = enclosingAzureType(content, index);
+    if (!/(?:database|storage|server)/i.test(type)) continue;
+    return { present: true, line: lineAt(content, index) };
+  }
+  return { present: false, line: 1 };
+}
+
+const azureExpressionWarning =
+  "Bicep modules and ARM expressions are not evaluated.";
+
+function parseAzure(content: string, format: "bicep" | "arm"): ParsedIac {
+  const visible = maskIaCComments(content);
+  return {
+    format,
+    resources: [
+      literalResource(
+        "azure.exposure",
+        "azure:exposure",
+        firstOpenAddress(visible),
+        "sourceAddressPrefix",
+      ),
+      literalResource(
+        "azure.publicNetwork",
+        "azure:publicNetwork",
+        firstPublicNetwork(visible),
+        "publicNetworkAccess",
+      ),
+    ],
+    warnings: [azureExpressionWarning],
   };
 }
