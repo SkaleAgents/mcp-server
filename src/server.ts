@@ -94,13 +94,17 @@ export function createServer(remote = false) {
             "ansible",
             "bicep",
             "arm",
+            "gitlab",
+            "azure-pipelines",
+            "cloudbuild",
+            "tfvars",
             "application",
             "auto",
           ])
           .optional()
           .default("auto")
           .describe(
-            "Content format: terraform, cloudformation, kubernetes, pulumi, compose, dockerfile, github, helm, ansible, bicep, arm, application, auto.",
+            "Content format: terraform, cloudformation, kubernetes, pulumi, compose, dockerfile, github, helm, ansible, bicep, arm, gitlab, azure-pipelines, cloudbuild, tfvars, application, auto.",
           ),
       },
     },
@@ -159,7 +163,7 @@ export function createServer(remote = false) {
           (name === "scan_iac_stub"
             ? "Compatibility alias for scan_iac; runs the full scanner. "
             : "") +
-          "Parse Terraform HCL/JSON, CloudFormation YAML/JSON, Kubernetes manifests, Pulumi YAML, Pulumi programs, or Docker Compose. Includes Dockerfile, GitHub Actions, Helm templates, Ansible playbooks, Bicep files, and ARM templates. Helm templates, Ansible facts, Bicep modules, and ARM expressions are not executed. Check security, reliability and cost rules with resource locations and remediation. Pulumi programs are scanned as text.",
+          "Parse Terraform HCL/JSON, CloudFormation YAML/JSON, Kubernetes manifests, Pulumi YAML, Pulumi programs, or Docker Compose. Includes Dockerfile, GitHub Actions, Helm templates, Ansible playbooks, Bicep files, ARM templates, GitLab CI, Azure Pipelines, Cloud Build, and tfvars. Helm templates, Ansible facts, Bicep modules, ARM expressions, and pipelines are not executed. Terraform module sources are not fetched. Check security, reliability and cost rules with resource locations and remediation. Pulumi programs are scanned as text.",
         annotations: {
           readOnlyHint: true,
           destructiveHint: false,
@@ -168,7 +172,7 @@ export function createServer(remote = false) {
         _meta: { securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }] },
         inputSchema: {
           content: contentSchema.describe(
-            "Terraform HCL/JSON, CloudFormation YAML/JSON, Kubernetes YAML/JSON, Pulumi YAML or program text, or Docker Compose. Includes Dockerfile, GitHub Actions, Helm templates, Ansible playbooks, Bicep files, and ARM templates.",
+            "Terraform HCL/JSON, CloudFormation YAML/JSON, Kubernetes YAML/JSON, Pulumi YAML or program text, or Docker Compose. Includes Dockerfile, GitHub Actions, Helm templates, Ansible playbooks, Bicep files, ARM templates, GitLab CI, Azure Pipelines, Cloud Build, and tfvars.",
           ),
           format: z
             .enum([
@@ -183,6 +187,10 @@ export function createServer(remote = false) {
               "ansible",
               "bicep",
               "arm",
+              "gitlab",
+              "azure-pipelines",
+              "cloudbuild",
+              "tfvars",
               "auto",
             ])
             .default("auto"),

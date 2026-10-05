@@ -12,7 +12,11 @@ export type IacFormat =
   | "helm"
   | "ansible"
   | "bicep"
-  | "arm";
+  | "arm"
+  | "gitlab"
+  | "azure-pipelines"
+  | "cloudbuild"
+  | "tfvars";
 export type Path = (string | number)[];
 export type Location = { line: number; column: number; path: string };
 export type Resource = {
@@ -87,7 +91,9 @@ export function looksLikeIac(content: string): boolean {
     looksLikeHelm(content) ||
     looksLikeAnsible(content) ||
     looksLikeBicep(content) ||
-    looksLikeArm(content)
+    looksLikeArm(content) ||
+    looksLikePipeline(content) !== undefined ||
+    looksLikeTfvars(content)
   );
 }
 
@@ -227,6 +233,20 @@ export function parseIac(
   ) {
     return parseHelm(content);
   }
+  const pipeline =
+    requested === "gitlab" ||
+    requested === "azure-pipelines" ||
+    requested === "cloudbuild"
+      ? requested
+      : requested === "auto"
+        ? looksLikePipeline(content)
+        : undefined;
+  if (pipeline) {
+    if (!pipelineMatches(content, pipeline))
+      throw new ScanInputError(pipelineShapeError(pipeline));
+    return parsePipeline(content, pipeline);
+  }
+  if (requested === "tfvars") return parseTfvars(content);
   if (requested === "bicep" || (requested === "auto" && looksLikeBicep(content))) {
     if (!looksLikeBicep(content))
       throw new ScanInputError(
@@ -293,20 +313,58 @@ export function parseIac(
         });
       }
     }
+    for (const [name, blocks] of Object.entries(object(object(data).module))) {
+      const declaration = new RegExp(
+        `\\bmodule\\s+"${escapeRegex(name)}"`,
+      ).exec(searchable);
+      const offset = declaration?.index ?? 0;
+      const before = content.slice(0, offset);
+      resources.push({
+        id: `module.${name}`,
+        type: "terraform:module",
+        value: object(array(blocks)[0]),
+        locate: (path = []) => ({
+          line: before.split("\n").length,
+          column: offset - before.lastIndexOf("\n"),
+          path: ["module", name, ...path].join("."),
+        }),
+      });
+    }
+    for (const [name, blocks] of Object.entries(object(object(data).variable))) {
+      const body = object(array(blocks)[0]);
+      if (!("default" in body)) continue;
+      const declaration = new RegExp(
+        `\\bvariable\\s+"${escapeRegex(name)}"`,
+      ).exec(searchable);
+      const offset = declaration?.index ?? 0;
+      const before = content.slice(0, offset);
+      resources.push({
+        id: `variable.${name}`,
+        type: "terraform:variable",
+        value: { name, default: body.default },
+        locate: (path = []) => ({
+          line: before.split("\n").length,
+          column: offset - before.lastIndexOf("\n"),
+          path: ["variable", name, ...path].join("."),
+        }),
+      });
+    }
     if (object(data).module)
       warnings.push(
-        "External Terraform modules are not expanded. Scan their source separately.",
+        "External modules are not expanded. The module body was not loaded, and the module source is not fetched or evaluated.",
       );
     if (JSON.stringify(data).includes("${"))
       warnings.push(
         "Terraform expressions are not evaluated. Findings use literal values and declared settings.",
       );
-    if (!resources.length)
+    if (!resources.some((item) => item.type !== "terraform:module" && item.type !== "terraform:variable"))
       warnings.push(
-        "No resource declarations found. Variables, data sources, and outputs are not scanned as resources.",
+        "No resource declarations found. Data sources and outputs are not scanned as resources.",
       );
     return { format: "terraform", resources, warnings };
   }
+
+  if (requested === "auto" && looksLikeTfvars(content)) return parseTfvars(content);
 
   const lines = new LineCounter();
   const tags = [
@@ -795,6 +853,275 @@ function workflowEnvIsLiteral(value: string): boolean {
 
 function lineLocation(line: number, path: string): Location {
   return { line, column: 1, path };
+}
+
+type PipelineFormat = "gitlab" | "azure-pipelines" | "cloudbuild";
+
+function stolenPipelineInput(content: string): boolean {
+  return (
+    looksLikeGithubWorkflow(content) ||
+    looksLikeAnsible(content) ||
+    looksLikeHelm(content) ||
+    (topLevelKey(content, "apiVersion") && topLevelKey(content, "kind"))
+  );
+}
+
+function azurePipelineShape(content: string): boolean {
+  const poolOrTrigger =
+    topLevelKey(content, "pool") || topLevelKey(content, "trigger");
+  const stepsOrStages =
+    topLevelKey(content, "steps") || topLevelKey(content, "stages");
+  return poolOrTrigger && stepsOrStages;
+}
+
+function gitlabShape(content: string): boolean {
+  if (!/\bimage\s*:/.test(content)) return false;
+  if (topLevelKey(content, "stages")) return true;
+  return /^\s*script\s*:/m.test(content);
+}
+
+function cloudBuildShape(content: string): boolean {
+  if (!topLevelKey(content, "steps")) return false;
+  if (topLevelKey(content, "on") && topLevelKey(content, "jobs")) return false;
+  return /^\s*-\s*name\s*:/m.test(content);
+}
+
+function looksLikePipeline(content: string): PipelineFormat | undefined {
+  if (stolenPipelineInput(content)) return undefined;
+  const visible = maskIaCComments(content);
+  if (azurePipelineShape(visible)) return "azure-pipelines";
+  if (gitlabShape(visible)) return "gitlab";
+  if (cloudBuildShape(visible)) return "cloudbuild";
+  return undefined;
+}
+
+function pipelineMatches(content: string, format: PipelineFormat): boolean {
+  if (stolenPipelineInput(content)) return false;
+  const visible = maskIaCComments(content);
+  if (format === "azure-pipelines") return azurePipelineShape(visible);
+  if (format === "gitlab") return gitlabShape(visible);
+  return cloudBuildShape(visible);
+}
+
+function pipelineShapeError(format: PipelineFormat): string {
+  if (format === "gitlab")
+    return "GitLab CI requires top-level stages or a job with script, and an image.";
+  if (format === "azure-pipelines")
+    return "Azure Pipelines requires a top-level pool or trigger, plus steps or stages.";
+  return "Cloud Build requires top-level steps whose items have a name.";
+}
+
+const pipelineWarning =
+  "The pipeline is not executed. Only literal text outside comments is checked.";
+
+function scriptText(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value) && value.every((item) => typeof item === "string"))
+    return value.join("\n");
+  return undefined;
+}
+
+function pipelineScriptKey(key: string): boolean {
+  return (
+    key === "script" ||
+    key === "before_script" ||
+    key === "after_script" ||
+    key === "bash" ||
+    key === "pwsh" ||
+    key === "powershell"
+  );
+}
+
+function pipelinePrintsSecret(script: string): boolean {
+  return script.split(/\n/).some((line) => {
+    const code = line.replace(/(^|\s)#.*$/, "").trim();
+    if (!/\b(?:echo|printf|print)\b/i.test(code)) return false;
+    return /CI_JOB_TOKEN|secrets\.|\$\(secret|(?:^|[^A-Za-z0-9_])(?:password|passwd|api_key|apikey|auth_token|access_key|private_key|token)(?:[^A-Za-z0-9_]|$)/i.test(
+      code,
+    );
+  });
+}
+
+type PipelineHit = {
+  kind: "image" | "script" | "privileged";
+  path: Path;
+  image?: string;
+  script?: string;
+};
+
+function collectPipelineHits(
+  value: unknown,
+  path: Path,
+  format: PipelineFormat,
+  hits: PipelineHit[],
+): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) =>
+      collectPipelineHits(item, [...path, index], format, hits),
+    );
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+  for (const [key, child] of Object.entries(object(value))) {
+    const childPath = [...path, key];
+    if ((key === "image" || key === "container") && typeof child === "string")
+      hits.push({ kind: "image", path: childPath, image: child });
+    else if (
+      key === "image" &&
+      typeof object(child).name === "string"
+    )
+      hits.push({
+        kind: "image",
+        path: [...childPath, "name"],
+        image: String(object(child).name),
+      });
+    if (key === "privileged" && child === true)
+      hits.push({ kind: "privileged", path: childPath });
+    const script = pipelineScriptKey(key) ? scriptText(child) : undefined;
+    if (script) hits.push({ kind: "script", path: childPath, script });
+    if (format === "cloudbuild" && key === "steps" && Array.isArray(child)) {
+      child.forEach((step, index) => {
+        const name = object(step).name;
+        if (typeof name === "string")
+          hits.push({
+            kind: "image",
+            path: [...childPath, index, "name"],
+            image: name,
+          });
+        const args = scriptText(object(step).args);
+        if (args)
+          hits.push({
+            kind: "script",
+            path: [...childPath, index, "args"],
+            script: args,
+          });
+      });
+    }
+    collectPipelineHits(child, childPath, format, hits);
+  }
+}
+
+function parsePipeline(content: string, format: PipelineFormat): ParsedIac {
+  const lines = new LineCounter();
+  let documents;
+  try {
+    documents = parseAllDocuments(content, {
+      lineCounter: lines,
+      prettyErrors: false,
+    });
+  } catch {
+    throw new ScanInputError(pipelineShapeError(format));
+  }
+  const resources: Resource[] = [];
+  let found = false;
+  for (const [documentIndex, doc] of documents.entries()) {
+    if (doc.errors.length) throw new ScanInputError(pipelineShapeError(format));
+    let data: unknown;
+    try {
+      data = doc.toJS({ maxAliasCount: 0 });
+    } catch {
+      throw new ScanInputError(
+        "YAML aliases are not supported. Expand anchors before scanning.",
+      );
+    }
+    if (data == null) continue;
+    checkShape(data);
+    found = true;
+    const hits: PipelineHit[] = [];
+    collectPipelineHits(data, [], format, hits);
+    const position = (path: Path) => {
+      let node = doc.getIn(path, true) as { range?: number[] } | undefined;
+      if (!node?.range)
+        node = doc.getIn([], true) as { range?: number[] } | undefined;
+      const at = lines.linePos(node?.range?.[0] ?? doc.range?.[0] ?? 0);
+      return {
+        line: at.line,
+        column: at.col,
+        path: [documentIndex, ...path].join("."),
+      };
+    };
+    hits.forEach((hit, index) => {
+      if (hit.kind === "image" && hit.image)
+        resources.push({
+          id: `pipeline.image.${index + 1}`,
+          type: "pipeline:image",
+          value: { unpinned: imageIsUnpinned(hit.image.trim(), new Set()) },
+          locate: () => position(hit.path),
+        });
+      else if (hit.kind === "script" && hit.script)
+        resources.push({
+          id: `pipeline.script.${index + 1}`,
+          type: "pipeline:script",
+          value: { printsSecret: pipelinePrintsSecret(hit.script) },
+          locate: () => position(hit.path),
+        });
+      else if (hit.kind === "privileged")
+        resources.push({
+          id: `pipeline.privileged.${index + 1}`,
+          type: "pipeline:privileged",
+          value: { present: true },
+          locate: () => position(hit.path),
+        });
+    });
+  }
+  if (!found) throw new ScanInputError(pipelineShapeError(format));
+  return { format, resources, warnings: [pipelineWarning] };
+}
+
+function looksLikeTfvars(content: string): boolean {
+  const visible = maskIaCComments(content);
+  if (/^\s*(?:resource|module|provider)\s+["']/m.test(visible)) return false;
+  if (/^\s*(?:terraform|provider|module)\s*\{/m.test(visible)) return false;
+  return /^\s*[A-Za-z_][A-Za-z0-9_]*\s*=\s*\S/m.test(visible);
+}
+
+function parseTfvars(content: string): ParsedIac {
+  let data: unknown;
+  try {
+    const [parsed, error] = hcl.parseToObject(content);
+    if (error || !parsed) throw new Error("parse");
+    data = parsed;
+  } catch {
+    throw new ScanInputError("Invalid tfvars. Check assignment syntax.");
+  }
+  checkShape(data);
+  const searchable = maskIaCComments(content);
+  const resources: Resource[] = [];
+  const skipped = new Set([
+    "resource",
+    "module",
+    "terraform",
+    "provider",
+    "variable",
+    "data",
+    "output",
+    "locals",
+  ]);
+  for (const [name, value] of Object.entries(object(data))) {
+    if (skipped.has(name)) continue;
+    const declaration = new RegExp(
+      `(^|\\n)\\s*${escapeRegex(name)}\\s*=`,
+    ).exec(searchable);
+    const offset = declaration?.index ?? 0;
+    const before = content.slice(0, offset);
+    resources.push({
+      id: `tfvars.${name}`,
+      type: "tfvars:assignment",
+      value: { name, value },
+      locate: (path = []) => ({
+        line: before.split("\n").length,
+        column: 1,
+        path: ["tfvars", name, ...path].join("."),
+      }),
+    });
+  }
+  return {
+    format: "tfvars",
+    resources,
+    warnings: [
+      "Terraform variable references are not evaluated. Findings use literal values.",
+    ],
+  };
 }
 
 function parseDockerfile(content: string): ParsedIac {
