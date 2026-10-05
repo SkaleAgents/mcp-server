@@ -207,7 +207,7 @@ export function looksLikePulumiYaml(content: string): boolean {
 }
 
 const terraformExpressionWarning =
-  "Same-file variable and local literals are resolved. Functions and other expressions are not evaluated.";
+  "Same-file variable and local literals are resolved. A string of those references and format of known literals are resolved. Other functions and expressions are not evaluated.";
 
 export function parseIac(
   content: string,
@@ -622,7 +622,7 @@ export function parseIac(
     /(?:!(?:Ref|Sub|GetAtt|If)\b|"(?:Ref|Fn::\w+)"\s*:|\bRef\s*:)/.test(content)
   )
     warnings.push(
-      "Same-file parameter defaults are resolved. Functions are not evaluated.",
+      "Same-file parameter defaults are resolved. A simple Fn::Sub of those parameters is resolved. Other functions are not evaluated.",
     );
   else if (/(?:!(?:Ref|Sub|GetAtt|If)\b|"(?:Ref|Fn::\w+)"\s*:|\$\{)/.test(content))
     warnings.push(
@@ -1747,6 +1747,35 @@ function cloudFormationIntrinsic(value: unknown): boolean {
   );
 }
 
+function cloudFormationSubTemplate(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const entries = Object.entries(value).filter(([key]) => key !== "__referencedSecrets");
+  if (entries.length !== 1) return undefined;
+  const [key, template] = entries[0];
+  if (key !== "Fn::Sub" || typeof template !== "string") return undefined;
+  return template;
+}
+
+function substituteKnownParameters(
+  template: string,
+  parameters: { defaults: Map<string, string | boolean | number>; secretNames: Set<string> },
+): { text: string; secret: boolean } | undefined {
+  let unresolved = false;
+  let secret = false;
+  const text = template.replace(/\$\{(!?)([^}]*)\}/g, (full, literalMark: string, rawName: string) => {
+    if (literalMark === "!") return `\${${rawName}}`;
+    const name = rawName.trim();
+    if (!parameters.defaults.has(name)) {
+      unresolved = true;
+      return full;
+    }
+    if (parameters.secretNames.has(name)) secret = true;
+    return String(parameters.defaults.get(name));
+  });
+  if (unresolved) return undefined;
+  return { text, secret };
+}
+
 function resolveCloudFormationRefs(
   value: Record<string, unknown>,
   parameters: { defaults: Map<string, string | boolean | number>; secretNames: Set<string> },
@@ -1786,6 +1815,13 @@ function resolveCloudFormationValue(
       secretPaths.push(path);
     return literal;
   }
+  const subTemplate = cloudFormationSubTemplate(value);
+  if (subTemplate !== undefined) {
+    const substituted = substituteKnownParameters(subTemplate, parameters);
+    if (!substituted) return value;
+    if (substituted.secret) secretPaths.push(path);
+    return substituted.text;
+  }
   if (cloudFormationIntrinsic(value)) return value;
   if (Array.isArray(value))
     return value.map((item, index) =>
@@ -1805,6 +1841,18 @@ function resolveCloudFormationValue(
     return out;
   }
   return value;
+}
+
+export function terraformJsonencodeValue(expression: string): unknown | undefined {
+  const match = /^\$\{jsonencode\(([\s\S]*)\)\}$/.exec(expression.trim());
+  if (!match) return undefined;
+  try {
+    const [parsed, error] = hcl.parseToObject(`value = ${match[1]}\n`);
+    if (error || !parsed) return undefined;
+    return object(parsed).value;
+  } catch {
+    return undefined;
+  }
 }
 
 function terraformLocalBlocks(data: unknown): Record<string, unknown>[] {
