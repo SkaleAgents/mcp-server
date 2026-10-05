@@ -450,17 +450,45 @@ export const rules: Record<string, Rule> = {
     remediation:
       "Reference the value with a Serverless variable such as ${env:TOKEN}. Do not commit a literal secret.",
   },
+  PKG001: {
+    category: "security",
+    severity: "high",
+    title: "Package script pipes a download to a shell",
+    detail:
+      "A package install script downloads with curl or wget and pipes the result to a shell.",
+    remediation:
+      "Run a reviewed local script instead of piping a remote download to a shell.",
+  },
+  PKG002: {
+    category: "security",
+    severity: "medium",
+    title: "Dependency range is floating",
+    detail: "A dependency range is * or latest.",
+    remediation: "Pin the dependency to a reviewed version.",
+  },
 };
+
+export type TerraformLiterals = {
+  vars: Map<string, string | boolean | number>;
+  locals: Map<string, string | boolean | number>;
+  declaredSecrets: Set<string>;
+};
+
+export function terraformLiterals(resources: Resource[]): TerraformLiterals {
+  return collectSameFileLiterals(resources);
+}
 
 export function resourceFindings(
   resources: Resource[],
   format: string,
+  shared?: TerraformLiterals,
 ): { findings: Finding[]; checked: Set<string> } {
   const findings: Finding[] = [];
   const checked = new Set<string>();
-  const sameFile = collectSameFileLiterals(resources);
+  const sameFile = shared ?? collectSameFileLiterals(resources);
   const suppressedSecrets = new WeakMap<Resource, Set<string>>();
   const moduleSecrets = new WeakMap<Resource, Set<string>>();
+  const valueOrigins = new WeakMap<Resource, Map<string, string>>();
   if (format === "terraform") {
     for (const resource of resources) {
       if (
@@ -471,18 +499,22 @@ export function resourceFindings(
         continue;
       const suppressed = new Set<string>();
       const referenced = new Set<string>();
-      resolveSameFileRefs(resource.value, sameFile, [], suppressed, referenced);
+      const origins = new Map<string, string>();
+      resolveSameFileRefs(resource.value, sameFile, [], suppressed, referenced, origins);
       suppressedSecrets.set(resource, suppressed);
       moduleSecrets.set(resource, referenced);
+      valueOrigins.set(resource, origins);
     }
   }
   for (const resource of resources) {
+    const origins = valueOrigins.get(resource) ?? cloudFormationOrigins(resource);
     const check = (id: string, condition: unknown, path: Path = []) => {
       checked.add(id);
       if (condition)
         findings.push({
           ruleId: id,
           ...rules[id],
+          detail: `${rules[id].detail}${originSentence(origins, path)}`,
           resource: resource.id,
           location: resource.locate(path),
         });
@@ -522,6 +554,10 @@ export function resourceFindings(
     if (format === "iam") {
       check("IAM001", resource.value.wildcard === true, ["Action"]);
       check("NET001", resource.value.openSourceIp === true, ["Condition"]);
+      continue;
+    }
+    if (format === "package") {
+      checkPackage(resource, check);
       continue;
     }
     if (resource.type === "terraform:local") {
@@ -755,9 +791,10 @@ function resolveInterpolationString(
     vars: Map<string, string | boolean | number>;
     locals: Map<string, string | boolean | number>;
   },
-): string | undefined {
+): { text: string; sources: string[] } | undefined {
   const trimmed = value.trim();
   if (!interpolationOnly.test(trimmed)) return undefined;
+  const sources: string[] = [];
   let count = 0;
   let failed = false;
   const text = trimmed.replace(interpolationPiece, (_full, kind: string, name: string) => {
@@ -767,10 +804,11 @@ function resolveInterpolationString(
       failed = true;
       return "";
     }
+    sources.push(`${kind}.${name}`);
     return part;
   });
   if (failed || count < 2) return undefined;
-  return text;
+  return { text, sources };
 }
 
 function splitCallArguments(source: string): string[] | undefined {
@@ -834,13 +872,24 @@ function resolveFormatArgument(
     vars: Map<string, string | boolean | number>;
     locals: Map<string, string | boolean | number>;
   },
-): string | undefined {
+): { text: string; source?: string } | undefined {
   const literal = unquoteHcl(token);
-  if (literal !== undefined) return literal;
-  if (/^-?\d+(?:\.\d+)?$/.test(token) || token === "true" || token === "false") return token;
+  if (literal !== undefined) {
+    const ref = exactSameFileRef.exec(literal.trim());
+    if (!ref) {
+      if (literal.includes("${")) return undefined;
+      return { text: literal };
+    }
+    const text = sameFileText(ref[1], ref[2], sameFile);
+    if (text === undefined) return undefined;
+    return { text, source: `${ref[1]}.${ref[2]}` };
+  }
+  if (/^-?\d+(?:\.\d+)?$/.test(token) || token === "true" || token === "false") return { text: token };
   const ref = /^(var|local)\.([A-Za-z_][A-Za-z0-9_]*)$/.exec(token);
   if (!ref) return undefined;
-  return sameFileText(ref[1], ref[2], sameFile);
+  const text = sameFileText(ref[1], ref[2], sameFile);
+  if (text === undefined) return undefined;
+  return { text, source: `${ref[1]}.${ref[2]}` };
 }
 
 function applyPercentS(format: string, args: string[]): string | undefined {
@@ -871,18 +920,72 @@ function resolveFormatCall(
     vars: Map<string, string | boolean | number>;
     locals: Map<string, string | boolean | number>;
   },
-): string | undefined {
+): { text: string; sources: string[] } | undefined {
   const wrapped = /^\$\{format\(([\s\S]*)\)\}$/.exec(value.trim());
   if (!wrapped) return undefined;
   const args = splitCallArguments(wrapped[1]);
   if (!args || args.length === 0) return undefined;
   const resolved: string[] = [];
+  const sources: string[] = [];
   for (const arg of args) {
     const part = resolveFormatArgument(arg, sameFile);
     if (part === undefined) return undefined;
-    resolved.push(part);
+    resolved.push(part.text);
+    if (part.source) sources.push(part.source);
   }
-  return applyPercentS(resolved[0], resolved.slice(1));
+  const text = applyPercentS(resolved[0], resolved.slice(1));
+  if (text === undefined) return undefined;
+  return { text, sources };
+}
+
+function parseHclList(token: string): string[] | undefined {
+  const trimmed = token.trim();
+  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return undefined;
+  return splitCallArguments(trimmed.slice(1, -1)) ?? [];
+}
+
+function resolveJoinCall(
+  value: string,
+  sameFile: {
+    vars: Map<string, string | boolean | number>;
+    locals: Map<string, string | boolean | number>;
+  },
+  depth = 0,
+): { text: string; sources: string[] } | undefined {
+  if (depth > 8) return undefined;
+  const wrapped = /^\$\{join\(([\s\S]*)\)\}$/.exec(value.trim());
+  const bare = /^join\(([\s\S]*)\)$/.exec(value.trim());
+  const source = wrapped?.[1] ?? bare?.[1];
+  if (source === undefined) return undefined;
+  const args = splitCallArguments(source);
+  if (!args || args.length !== 2) return undefined;
+  const separator = resolveJoinPiece(args[0], sameFile, depth);
+  const list = parseHclList(args[1]);
+  if (!separator || !list) return undefined;
+  const parts: string[] = [];
+  const sources = [...separator.sources];
+  for (const element of list) {
+    const resolved = resolveJoinPiece(element, sameFile, depth);
+    if (!resolved) return undefined;
+    parts.push(resolved.text);
+    sources.push(...resolved.sources);
+  }
+  return { text: parts.join(separator.text), sources };
+}
+
+function resolveJoinPiece(
+  token: string,
+  sameFile: {
+    vars: Map<string, string | boolean | number>;
+    locals: Map<string, string | boolean | number>;
+  },
+  depth: number,
+): { text: string; sources: string[] } | undefined {
+  if (/^join\(/.test(token.trim()))
+    return resolveJoinCall(`\${${token.trim()}}`, sameFile, depth + 1);
+  const resolved = resolveFormatArgument(token, sameFile);
+  if (!resolved) return undefined;
+  return { text: resolved.text, sources: resolved.source ? [resolved.source] : [] };
 }
 
 function noteResolvedLiteral(
@@ -937,6 +1040,11 @@ function collectSameFileLiterals(resources: Resource[]): {
   return { vars, locals, declaredSecrets };
 }
 
+function recordResolvedSources(origins: Map<string, string>, path: Path, sources: string[]): void {
+  const unique = [...new Set(sources)];
+  if (unique.length === 1) origins.set(path.join("."), unique[0]);
+}
+
 function resolveSameFileRefs(
   value: unknown,
   sameFile: {
@@ -947,6 +1055,7 @@ function resolveSameFileRefs(
   path: Path,
   suppressed: Set<string>,
   referencedSecrets: Set<string>,
+  origins: Map<string, string>,
 ): unknown {
   if (typeof value === "string") {
     const match = exactSameFileRef.exec(value.trim());
@@ -955,17 +1064,26 @@ function resolveSameFileRefs(
       if (literal === undefined) return value;
       if (typeof literal === "string")
         noteResolvedLiteral(literal, path, sameFile, suppressed, referencedSecrets);
+      origins.set(path.join("."), `${match[1]}.${match[2]}`);
       return literal;
     }
     const concatenated = resolveInterpolationString(value, sameFile);
     if (concatenated !== undefined) {
-      noteResolvedLiteral(concatenated, path, sameFile, suppressed, referencedSecrets);
-      return concatenated;
+      noteResolvedLiteral(concatenated.text, path, sameFile, suppressed, referencedSecrets);
+      recordResolvedSources(origins, path, concatenated.sources);
+      return concatenated.text;
     }
     const formatted = resolveFormatCall(value, sameFile);
     if (formatted !== undefined) {
-      noteResolvedLiteral(formatted, path, sameFile, suppressed, referencedSecrets);
-      return formatted;
+      noteResolvedLiteral(formatted.text, path, sameFile, suppressed, referencedSecrets);
+      recordResolvedSources(origins, path, formatted.sources);
+      return formatted.text;
+    }
+    const joined = resolveJoinCall(value, sameFile);
+    if (joined !== undefined) {
+      noteResolvedLiteral(joined.text, path, sameFile, suppressed, referencedSecrets);
+      recordResolvedSources(origins, path, joined.sources);
+      return joined.text;
     }
     return value;
   }
@@ -977,23 +1095,48 @@ function resolveSameFileRefs(
         [...path, index],
         suppressed,
         referencedSecrets,
+        origins,
       );
     });
     return value;
   }
   if (value && typeof value === "object") {
     for (const [key, child] of Object.entries(value)) {
-      if (key === "__referencedSecrets") continue;
+      if (key === "__referencedSecrets" || key === "__valueOrigins") continue;
       (value as Record<string, unknown>)[key] = resolveSameFileRefs(
         child,
         sameFile,
         [...path, key],
         suppressed,
         referencedSecrets,
+        origins,
       );
     }
   }
   return value;
+}
+
+function cloudFormationOrigins(resource: Resource): Map<string, string> {
+  const stored = Object.getOwnPropertyDescriptor(resource.value, "__valueOrigins")?.value;
+  return stored instanceof Map ? stored : new Map();
+}
+
+function originSentence(origins: Map<string, string>, path: Path): string {
+  if (origins.size === 0) return "";
+  const prefix = path.join(".");
+  const sources = new Set<string>();
+  for (const [key, source] of origins) {
+    if (key === prefix || key.startsWith(`${prefix}.`)) sources.add(source);
+  }
+  if (sources.size !== 1) return "";
+  return ` Value comes from ${[...sources][0]}.`;
+}
+
+function checkPackage(resource: Resource, check: Check): void {
+  if (resource.type === "package:script")
+    check("PKG001", resource.value.pipes === true, ["command"]);
+  else if (resource.type === "package:dependency")
+    check("PKG002", resource.value.range === "*" || resource.value.range === "latest", ["range"]);
 }
 
 function dedupeSecretFindings(findings: Finding[]): Finding[] {

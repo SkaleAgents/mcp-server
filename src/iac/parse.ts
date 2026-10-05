@@ -18,7 +18,8 @@ export type IacFormat =
   | "cloudbuild"
   | "tfvars"
   | "serverless"
-  | "iam";
+  | "iam"
+  | "package";
 export type Path = (string | number)[];
 export type Location = { line: number; column: number; path: string };
 export type Resource = {
@@ -74,6 +75,7 @@ export function looksLikeIac(content: string): boolean {
       if (value.resource || value.Resources || (value.apiVersion && value.kind))
         return true;
       if (looksLikeIamPolicy(content)) return true;
+      if (looksLikePackage(content)) return true;
     } catch {
       /* Other format detection still applies to incomplete input. */
     }
@@ -207,14 +209,23 @@ export function looksLikePulumiYaml(content: string): boolean {
 }
 
 const terraformExpressionWarning =
-  "Same-file variable and local literals are resolved. A string of those references and format of known literals are resolved. Other functions and expressions are not evaluated.";
+  "Variable and local literals from the submitted files are resolved. A string of those references, format of known literals, and join of known literals are resolved. Other functions and expressions are not evaluated.";
+
+export type CloudFormationTables = {
+  defaults: Map<string, string | boolean | number>;
+  secretNames: Set<string>;
+  mappings: Map<string, Record<string, Record<string, string | number | boolean>>>;
+};
 
 export function parseIac(
   content: string,
   requested: IacFormat | "auto" = "auto",
+  shared?: CloudFormationTables,
 ): ParsedIac {
   if (!content.trim())
     throw new ScanInputError("Content must not be empty or whitespace.");
+  if (requested === "package" || (requested === "auto" && looksLikePackage(content)))
+    return parsePackage(content);
   // Detect these before HCL or a failing YAML parse so a Dockerfile is not classified as Terraform.
   if (
     requested === "dockerfile" ||
@@ -535,7 +546,20 @@ export function parseIac(
         throw new ScanInputError(
           "CloudFormation requires a Resources mapping.",
         );
-      const parameters = cloudFormationParameterLiterals(root);
+      const localParameters = cloudFormationParameterLiterals(root);
+      const localMappings = cloudFormationMappings(root);
+      const parameters = {
+        defaults: new Map(shared?.defaults ?? localParameters.defaults),
+        secretNames: new Set(shared?.secretNames ?? localParameters.secretNames),
+      };
+      const mappings = new Map(shared?.mappings ?? localMappings);
+      if (shared) {
+        for (const [name, value] of localParameters.defaults)
+          if (!parameters.defaults.has(name)) parameters.defaults.set(name, value);
+        for (const name of localParameters.secretNames) parameters.secretNames.add(name);
+        for (const [name, value] of localMappings)
+          if (!mappings.has(name)) mappings.set(name, value);
+      }
       for (const [name, raw] of Object.entries(object(root.Resources))) {
         const value = object(raw);
         if (typeof value.Type !== "string")
@@ -545,7 +569,7 @@ export function parseIac(
         add(
           name,
           value.Type,
-          resolveCloudFormationRefs(value, parameters),
+          resolveCloudFormationRefs(value, parameters, mappings),
           ["Resources", name],
         );
       }
@@ -613,7 +637,7 @@ export function parseIac(
   }
   if (!format)
     throw new ScanInputError(
-      "No IaC document found. Choose Terraform, CloudFormation, Kubernetes, Pulumi, Docker Compose, a Dockerfile, a GitHub Actions workflow, a Helm template, an Ansible playbook, Bicep, an ARM template, Serverless Framework, or a standalone IAM policy.",
+      "No IaC document found. Choose Terraform, CloudFormation, Kubernetes, Pulumi, Docker Compose, a Dockerfile, a GitHub Actions workflow, a Helm template, an Ansible playbook, Bicep, an ARM template, Serverless Framework, a standalone IAM policy, or a package.json.",
     );
   if (!resources.length)
     warnings.push("No resources found in the submitted document.");
@@ -622,7 +646,7 @@ export function parseIac(
     /(?:!(?:Ref|Sub|GetAtt|If)\b|"(?:Ref|Fn::\w+)"\s*:|\bRef\s*:)/.test(content)
   )
     warnings.push(
-      "Same-file parameter defaults are resolved. A simple Fn::Sub of those parameters is resolved. Other functions are not evaluated.",
+      "Same-file and cross-file parameter defaults are resolved. A simple Fn::Sub, Fn::Join, and Fn::FindInMap of known literals are resolved. Other functions are not evaluated.",
     );
   else if (/(?:!(?:Ref|Sub|GetAtt|If)\b|"(?:Ref|Fn::\w+)"\s*:|\$\{)/.test(content))
     warnings.push(
@@ -1712,6 +1736,60 @@ function parameterNameIsSecret(name: string): boolean {
   );
 }
 
+function cloudFormationMappings(
+  root: Record<string, unknown>,
+): Map<string, Record<string, Record<string, string | number | boolean>>> {
+  const mappings = new Map<string, Record<string, Record<string, string | number | boolean>>>();
+  for (const [mapName, top] of Object.entries(object(root.Mappings))) {
+    const levels: Record<string, Record<string, string | number | boolean>> = {};
+    for (const [topKey, second] of Object.entries(object(top))) {
+      const entries: Record<string, string | number | boolean> = {};
+      for (const [secondKey, raw] of Object.entries(object(second))) {
+        if (typeof raw === "string" || typeof raw === "number" || typeof raw === "boolean")
+          entries[secondKey] = raw;
+      }
+      levels[topKey] = entries;
+    }
+    mappings.set(mapName, levels);
+  }
+  return mappings;
+}
+
+export function readCloudFormationTables(content: string): CloudFormationTables {
+  const empty = (): CloudFormationTables => ({
+    defaults: new Map(),
+    secretNames: new Set(),
+    mappings: new Map(),
+  });
+  const trimmed = content.trim();
+  if (!trimmed) return empty();
+  let root: Record<string, unknown>;
+  try {
+    if (trimmed.startsWith("{")) root = object(JSON.parse(trimmed));
+    else {
+      const docs = parseAllDocuments(trimmed, { prettyErrors: false });
+      const doc = docs[0];
+      if (!doc || doc.errors.length) return empty();
+      root = object(doc.toJS({ maxAliasCount: 0 }));
+    }
+  } catch {
+    return empty();
+  }
+  if (
+    !root.Parameters &&
+    !root.Mappings &&
+    !root.Resources &&
+    typeof root.AWSTemplateFormatVersion !== "string"
+  )
+    return empty();
+  const parameters = cloudFormationParameterLiterals(root);
+  return {
+    defaults: parameters.defaults,
+    secretNames: parameters.secretNames,
+    mappings: cloudFormationMappings(root),
+  };
+}
+
 function cloudFormationParameterLiterals(root: Record<string, unknown>): {
   defaults: Map<string, string | boolean | number>;
   secretNames: Set<string>;
@@ -1759,9 +1837,10 @@ function cloudFormationSubTemplate(value: unknown): string | undefined {
 function substituteKnownParameters(
   template: string,
   parameters: { defaults: Map<string, string | boolean | number>; secretNames: Set<string> },
-): { text: string; secret: boolean } | undefined {
+): { text: string; secret: boolean; names: string[] } | undefined {
   let unresolved = false;
   let secret = false;
+  const names: string[] = [];
   const text = template.replace(/\$\{(!?)([^}]*)\}/g, (full, literalMark: string, rawName: string) => {
     if (literalMark === "!") return `\${${rawName}}`;
     const name = rawName.trim();
@@ -1769,30 +1848,71 @@ function substituteKnownParameters(
       unresolved = true;
       return full;
     }
+    names.push(name);
     if (parameters.secretNames.has(name)) secret = true;
     return String(parameters.defaults.get(name));
   });
   if (unresolved) return undefined;
-  return { text, secret };
+  return { text, secret, names };
+}
+
+function cloudFormationJoin(value: unknown): [unknown, unknown[]] | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const entries = Object.entries(value).filter(
+    ([key]) => key !== "__referencedSecrets" && key !== "__valueOrigins",
+  );
+  if (entries.length !== 1) return undefined;
+  const [key, body] = entries[0];
+  if (key !== "Fn::Join" || !Array.isArray(body) || body.length !== 2 || !Array.isArray(body[1]))
+    return undefined;
+  return [body[0], body[1]];
+}
+
+function cloudFormationFindInMap(value: unknown): [unknown, unknown, unknown] | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const entries = Object.entries(value).filter(
+    ([key]) => key !== "__referencedSecrets" && key !== "__valueOrigins",
+  );
+  if (entries.length !== 1) return undefined;
+  const [key, body] = entries[0];
+  if (key !== "Fn::FindInMap" || !Array.isArray(body) || body.length !== 3) return undefined;
+  return [body[0], body[1], body[2]];
+}
+
+function knownLiteral(value: unknown): string | undefined {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean")
+    return String(value);
+  return undefined;
+}
+
+function recordSingleOrigin(origins: Map<string, string>, path: Path, names: string[]): void {
+  const unique = [...new Set(names)];
+  if (unique.length === 1) origins.set(path.join("."), unique[0]);
 }
 
 function resolveCloudFormationRefs(
   value: Record<string, unknown>,
   parameters: { defaults: Map<string, string | boolean | number>; secretNames: Set<string> },
+  mappings: Map<string, Record<string, Record<string, string | number | boolean>>>,
 ): Record<string, unknown> {
   const secretPaths: Path[] = [];
-  const resolved = resolveCloudFormationValue(value, parameters, [], secretPaths);
-  if (
-    secretPaths.length > 0 &&
-    resolved &&
-    typeof resolved === "object" &&
-    !Array.isArray(resolved)
-  ) {
-    Object.defineProperty(resolved, "__referencedSecrets", {
-      enumerable: false,
-      configurable: true,
-      value: secretPaths,
-    });
+  const origins = new Map<string, string>();
+  const resolved = resolveCloudFormationValue(value, parameters, mappings, [], secretPaths, origins);
+  if (resolved && typeof resolved === "object" && !Array.isArray(resolved)) {
+    if (secretPaths.length > 0) {
+      Object.defineProperty(resolved, "__referencedSecrets", {
+        enumerable: false,
+        configurable: true,
+        value: secretPaths,
+      });
+    }
+    if (origins.size > 0) {
+      Object.defineProperty(resolved, "__valueOrigins", {
+        enumerable: false,
+        configurable: true,
+        value: origins,
+      });
+    }
   }
   return object(resolved);
 }
@@ -1800,8 +1920,10 @@ function resolveCloudFormationRefs(
 function resolveCloudFormationValue(
   value: unknown,
   parameters: { defaults: Map<string, string | boolean | number>; secretNames: Set<string> },
+  mappings: Map<string, Record<string, Record<string, string | number | boolean>>>,
   path: Path,
   secretPaths: Path[],
+  origins: Map<string, string>,
 ): unknown {
   const ref = cloudFormationRefName(value);
   if (ref) {
@@ -1813,6 +1935,7 @@ function resolveCloudFormationValue(
       literal.trim() !== ""
     )
       secretPaths.push(path);
+    origins.set(path.join("."), `parameter ${ref}`);
     return literal;
   }
   const subTemplate = cloudFormationSubTemplate(value);
@@ -1820,22 +1943,66 @@ function resolveCloudFormationValue(
     const substituted = substituteKnownParameters(subTemplate, parameters);
     if (!substituted) return value;
     if (substituted.secret) secretPaths.push(path);
+    recordSingleOrigin(
+      origins,
+      path,
+      substituted.names.map((name) => `parameter ${name}`),
+    );
     return substituted.text;
+  }
+  const join = cloudFormationJoin(value);
+  if (join) {
+    const [separator, list] = join;
+    const resolvedSeparator = resolveCloudFormationValue(
+      separator,
+      parameters,
+      mappings,
+      [...path, 0],
+      secretPaths,
+      origins,
+    );
+    const separatorText = knownLiteral(resolvedSeparator);
+    if (separatorText === undefined) return value;
+    const parts: string[] = [];
+    for (const [index, item] of list.entries()) {
+      const resolved = resolveCloudFormationValue(
+        item,
+        parameters,
+        mappings,
+        [...path, 1, index],
+        secretPaths,
+        origins,
+      );
+      const text = knownLiteral(resolved);
+      if (text === undefined) return value;
+      parts.push(text);
+    }
+    return parts.join(separatorText);
+  }
+  const find = cloudFormationFindInMap(value);
+  if (find) {
+    const [mapName, topKey, secondKey] = find.map((key) => knownLiteral(key));
+    if (!mapName || !topKey || !secondKey) return value;
+    const mapped = mappings.get(mapName)?.[topKey]?.[secondKey];
+    if (mapped === undefined) return value;
+    return mapped;
   }
   if (cloudFormationIntrinsic(value)) return value;
   if (Array.isArray(value))
     return value.map((item, index) =>
-      resolveCloudFormationValue(item, parameters, [...path, index], secretPaths),
+      resolveCloudFormationValue(item, parameters, mappings, [...path, index], secretPaths, origins),
     );
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [key, child] of Object.entries(value)) {
-      if (key === "__referencedSecrets") continue;
+      if (key === "__referencedSecrets" || key === "__valueOrigins") continue;
       out[key] = resolveCloudFormationValue(
         child,
         parameters,
+        mappings,
         [...path, key],
         secretPaths,
+        origins,
       );
     }
     return out;
@@ -1873,6 +2040,87 @@ export function looksLikeServerless(content: string): boolean {
   if (!topLevelKey(content, "service") || !topLevelKey(content, "provider"))
     return false;
   return topLevelKey(content, "functions") || topLevelKey(content, "plugins");
+}
+
+function plainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+export function looksLikePackage(content: string): boolean {
+  const trimmed = content.trim();
+  if (!trimmed.startsWith("{")) return false;
+  let value: unknown;
+  try {
+    value = JSON.parse(trimmed);
+  } catch {
+    return false;
+  }
+  const root = object(value);
+  if (typeof root.name !== "string" || root.name.trim() === "") return false;
+  if ("resource" in root || "Resources" in root || typeof root.AWSTemplateFormatVersion === "string")
+    return false;
+  if (looksLikeIamPolicy(trimmed)) return false;
+  return (
+    plainObject(root.dependencies) ||
+    plainObject(root.devDependencies) ||
+    plainObject(root.scripts)
+  );
+}
+
+function scriptPipesDownload(command: string): boolean {
+  return /\b(?:curl|wget)\b[\s\S]*\|\s*(?:ba)?sh\b/.test(command);
+}
+
+function jsonKeyLine(content: string, key: string): number {
+  const match = new RegExp(`"${escapeRegex(key)}"\\s*:`).exec(content);
+  if (!match) return 1;
+  return content.slice(0, match.index).split("\n").length;
+}
+
+function parsePackage(content: string): ParsedIac {
+  if (!looksLikePackage(content))
+    throw new ScanInputError(
+      "A package.json requires a top-level name plus dependencies, devDependencies, or scripts.",
+    );
+  const root = object(JSON.parse(content));
+  const resources: Resource[] = [];
+  resources.push({
+    id: String(root.name),
+    type: "package:manifest",
+    value: { name: root.name },
+    locate: () => ({ line: jsonKeyLine(content, "name"), column: 1, path: "name" }),
+  });
+  const scripts = object(root.scripts);
+  for (const name of ["preinstall", "install", "postinstall"] as const) {
+    if (typeof scripts[name] !== "string") continue;
+    resources.push({
+      id: `scripts.${name}`,
+      type: "package:script",
+      value: { name, command: scripts[name], pipes: scriptPipesDownload(scripts[name]) },
+      locate: () => ({
+        line: jsonKeyLine(content, name),
+        column: 1,
+        path: `scripts.${name}`,
+      }),
+    });
+  }
+  for (const field of ["dependencies", "devDependencies", "optionalDependencies"] as const) {
+    if (!plainObject(root[field])) continue;
+    for (const [dep, range] of Object.entries(root[field])) {
+      if (range !== "*" && range !== "latest") continue;
+      resources.push({
+        id: `${field}.${dep}`,
+        type: "package:dependency",
+        value: { field, name: dep, range },
+        locate: () => ({
+          line: jsonKeyLine(content, dep),
+          column: 1,
+          path: `${field}.${dep}`,
+        }),
+      });
+    }
+  }
+  return { format: "package", resources, warnings: [] };
 }
 
 export function looksLikeIamPolicy(content: string): boolean {
