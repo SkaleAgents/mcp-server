@@ -1780,7 +1780,6 @@ Resources:
 Parameters:
   Cidr:
     Type: String
-    Default: 0.0.0.0/0
   Missing:
     Type: String
 Resources:
@@ -1910,5 +1909,380 @@ functions:
       "Broad network exposure",
     );
     assert.equal(serverless.findings.filter((finding) => finding.ruleId === "IAM001").length, 0);
+  });
+});
+
+describe("bounded substitutions and inline allow policies", () => {
+  it("resolves a simple Fn::Sub of known parameter defaults", () => {
+    const open = scanIac(`AWSTemplateFormatVersion: "2010-09-09"
+Parameters:
+  Cidr:
+    Type: String
+    Default: 0.0.0.0/0
+Resources:
+  Sg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: web
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp:
+            Fn::Sub: "\${Cidr}"
+`);
+    assert.equal(open.format, "cloudformation");
+    const exposure = open.findings.filter((finding) => finding.ruleId === "NET001");
+    assert.equal(exposure.length, 1);
+    assert.equal(exposure[0]?.title, "Broad network exposure");
+    assert.equal(exposure[0]?.severity, "high");
+
+    const ipv6 = scanIac(JSON.stringify({
+      AWSTemplateFormatVersion: "2010-09-09",
+      Parameters: { Cidr: { Type: "String", Default: "::/0" } },
+      Resources: {
+        Sg: {
+          Type: "AWS::EC2::SecurityGroup",
+          Properties: {
+            GroupDescription: "web",
+            SecurityGroupIngress: [{
+              IpProtocol: "tcp",
+              FromPort: 80,
+              ToPort: 80,
+              CidrIpv6: { "Fn::Sub": "${Cidr}" },
+            }],
+          },
+        },
+      },
+    }));
+    assert.equal(ipv6.findings.filter((finding) => finding.ruleId === "NET001").length, 1);
+  });
+
+  it("leaves unknown Fn::Sub names, Fn::Join, and Fn::FindInMap unresolved", () => {
+    const region = scanIac(`AWSTemplateFormatVersion: "2010-09-09"
+Parameters:
+  Cidr:
+    Type: String
+    Default: 0.0.0.0/0
+Resources:
+  Sg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: web
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp:
+            Fn::Sub: "\${AWS::Region}"
+        - IpProtocol: tcp
+          FromPort: 81
+          ToPort: 81
+          CidrIp:
+            Fn::Sub: "\${AWS::AccountId}"
+        - IpProtocol: tcp
+          FromPort: 82
+          ToPort: 82
+          CidrIp:
+            Fn::Sub: "\${Cidr}-\${AWS::Region}"
+        - IpProtocol: tcp
+          FromPort: 83
+          ToPort: 83
+          CidrIp:
+            Fn::Join: ["", ["0.0.0.0", "/0"]]
+        - IpProtocol: tcp
+          FromPort: 84
+          ToPort: 84
+          CidrIp:
+            Fn::FindInMap: [Net, Public, Cidr]
+`);
+    assert.equal(region.findings.filter((finding) => finding.ruleId === "NET001").length, 0);
+
+    const commented = scanIac(`AWSTemplateFormatVersion: "2010-09-09"
+# Fn::Sub: "\${Cidr}"
+# CidrIp: 0.0.0.0/0
+Resources:
+  Sg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: web
+`);
+    assert.equal(commented.findings.filter((finding) => finding.ruleId === "NET001").length, 0);
+  });
+
+  it("resolves format and strings made only of known var and local literals", () => {
+    const formatted = scanIac(`variable "cidr" {
+  default = "0.0.0.0/0"
+}
+resource "aws_security_group" "web" {
+  ingress {
+    cidr_blocks = [format("%s", var.cidr)]
+  }
+}
+`);
+    const formattedHits = formatted.findings.filter(
+      (finding) => finding.ruleId === "NET001" && finding.location?.path.includes("cidr_blocks"),
+    );
+    assert.equal(formattedHits.length, 1);
+    assert.equal(formattedHits[0]?.title, "Broad network exposure");
+
+    const localFormatted = scanIac(`locals {
+  cidr = "0.0.0.0/0"
+}
+resource "aws_security_group" "web" {
+  ingress {
+    cidr_blocks = [format("%s", local.cidr)]
+  }
+}
+`);
+    assert.equal(
+      localFormatted.findings.filter(
+        (finding) => finding.ruleId === "NET001" && finding.location?.path.includes("cidr_blocks"),
+      ).length,
+      1,
+    );
+
+    const combined = scanIac(`variable "a" {
+  default = "0.0.0.0"
+}
+variable "b" {
+  default = "/0"
+}
+resource "aws_security_group" "web" {
+  ingress {
+    cidr_blocks = ["\${var.a}\${var.b}"]
+  }
+}
+`);
+    assert.equal(
+      combined.findings.filter(
+        (finding) => finding.ruleId === "NET001" && finding.location?.path.includes("cidr_blocks"),
+      ).length,
+      1,
+    );
+
+    const ipv6 = scanIac(`locals {
+  cidr = "::/0"
+}
+resource "aws_security_group" "web" {
+  ingress {
+    ipv6_cidr_blocks = [format("%s", local.cidr)]
+  }
+}
+`);
+    assert.equal(
+      ipv6.findings.filter(
+        (finding) => finding.ruleId === "NET001" && finding.location?.path.includes("ipv6_cidr_blocks"),
+      ).length,
+      1,
+    );
+  });
+
+  it("keeps other functions and private format results clear", () => {
+    const samples = [
+      `variable "cidr" {
+  default = "10.0.0.0/24"
+}
+resource "aws_security_group" "web" {
+  ingress {
+    cidr_blocks = [format("%s", var.cidr)]
+  }
+}
+`,
+      `locals {
+  cidr = "10.0.0.0/24"
+}
+resource "aws_security_group" "web" {
+  ingress {
+    cidr_blocks = [format("%s", local.cidr)]
+  }
+}
+`,
+      `variable "cidr" {
+  default = "0.0.0.0/0"
+}
+resource "aws_security_group" "web" {
+  ingress {
+    cidr_blocks = [cidrsubnet(var.cidr, 8, 1)]
+  }
+}
+`,
+      `variable "cidr" {
+  default = "0.0.0.0/0"
+}
+resource "aws_security_group" "web" {
+  ingress {
+    cidr_blocks = [join(",", [var.cidr])]
+  }
+}
+`,
+      `variable "cidr" {
+  default = "0.0.0.0/0"
+}
+resource "aws_security_group" "web" {
+  ingress {
+    cidr_blocks = [coalesce(var.cidr, "10.0.0.0/8")]
+  }
+}
+`,
+      `variable "a" {
+  default = "0.0.0.0"
+}
+resource "aws_security_group" "web" {
+  ingress {
+    cidr_blocks = ["\${var.a}\${var.missing}"]
+  }
+}
+# cidr_blocks = [format("%s", var.cidr)]
+# 0.0.0.0/0
+`,
+    ];
+    for (const content of samples) {
+      const scan = scanIac(content);
+      assert.equal(
+        scan.findings.filter(
+          (finding) => finding.ruleId === "NET001" && finding.location?.path.includes("cidr_blocks"),
+        ).length,
+        0,
+      );
+    }
+  });
+
+  it("flags inline allow policies without taking a standalone IAM document", () => {
+    const standalone = scanIac(`{
+  "Version": "2012-10-17",
+  "Statement": [{ "Effect": "Allow", "Action": "*", "Resource": "*" }]
+}`);
+    assert.equal(standalone.format, "iam");
+    assert.equal(standalone.findings.filter((finding) => finding.ruleId === "IAM001").length, 1);
+    assert.equal(standalone.findings[0]?.title, "Wildcard permission detected");
+
+    const encoded = scanIac(`resource "aws_iam_policy" "open" {
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = "*"
+      Resource = "*"
+    }]
+  })
+}
+`);
+    assert.equal(encoded.format, "terraform");
+    assert.equal(encoded.findings.filter((finding) => finding.ruleId === "IAM001").length, 1);
+    assert.equal(
+      encoded.findings.find((finding) => finding.ruleId === "IAM001")?.title,
+      "Wildcard permission detected",
+    );
+    assert.equal(encoded.findings.find((finding) => finding.ruleId === "IAM001")?.severity, "high");
+
+    const omitted = scanIac(`resource "aws_iam_policy" "open" {
+  policy = jsonencode({
+    Statement = [{
+      Action = ["*"]
+      Resource = "*"
+    }]
+  })
+}
+`);
+    assert.equal(omitted.findings.filter((finding) => finding.ruleId === "IAM001").length, 1);
+
+    const heredoc = scanIac(`resource "aws_iam_role" "open" {
+  assume_role_policy = <<-EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": "*",
+    "Action": "sts:AssumeRole"
+  }]
+}
+EOF
+}
+`);
+    assert.equal(heredoc.findings.filter((finding) => finding.ruleId === "IAM002").length, 1);
+    assert.equal(heredoc.findings[0]?.title, "Policy allows any principal");
+    assert.equal(heredoc.findings[0]?.severity, "high");
+    assert.equal(heredoc.findings.filter((finding) => finding.ruleId === "IAM001").length, 0);
+
+    const mapped = scanIac(`resource "aws_iam_policy" "open" {
+  policy = jsonencode({
+    Statement = [{
+      Effect = "Allow"
+      Principal = { AWS = "*" }
+      Action = "s3:GetObject"
+      Resource = "*"
+    }]
+  })
+}
+`);
+    assert.equal(mapped.findings.filter((finding) => finding.ruleId === "IAM002").length, 1);
+    assert.equal(mapped.findings.filter((finding) => finding.ruleId === "IAM001").length, 0);
+
+    const cloudformation = scanIac(`AWSTemplateFormatVersion: "2010-09-09"
+Resources:
+  Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: "*"
+            Action: s3:GetObject
+            Resource: "*"
+`);
+    assert.equal(cloudformation.format, "cloudformation");
+    assert.equal(cloudformation.findings.filter((finding) => finding.ruleId === "IAM002").length, 1);
+    assert.equal(
+      cloudformation.findings.find((finding) => finding.ruleId === "IAM002")?.title,
+      "Policy allows any principal",
+    );
+    assert.equal(cloudformation.findings.filter((finding) => finding.ruleId === "IAM001").length, 0);
+  });
+
+  it("keeps deny, specific principals, specific actions, and comments clear", () => {
+    const clear = scanIac(`# Action = "*"
+# Principal = "*"
+resource "aws_iam_policy" "tight" {
+  policy = jsonencode({
+    Statement = [
+      {
+        Effect = "Deny"
+        Action = "*"
+        Principal = "*"
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Principal = { AWS = "arn:aws:iam::123456789012:root" }
+        Action = "s3:GetObject"
+        Resource = "*"
+      }
+    ]
+  })
+}
+`);
+    assert.equal(clear.findings.filter((finding) => finding.ruleId === "IAM001" || finding.ruleId === "IAM002").length, 0);
+
+    const document = scanIac(`AWSTemplateFormatVersion: "2010-09-09"
+# Principal: "*"
+Resources:
+  Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Deny
+            Action: "*"
+            Principal: "*"
+            Resource: "*"
+          - Effect: Allow
+            Principal:
+              AWS: arn:aws:iam::123456789012:root
+            Action: s3:GetObject
+            Resource: "*"
+`);
+    assert.equal(document.findings.filter((finding) => finding.ruleId === "IAM001" || finding.ruleId === "IAM002").length, 0);
   });
 });

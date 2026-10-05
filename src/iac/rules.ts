@@ -1,4 +1,4 @@
-import { array, object, type Path, type Resource } from "./parse.js";
+import { array, object, terraformJsonencodeValue, type Path, type Resource } from "./parse.js";
 import type { Finding, FindingSeverity } from "../review.js";
 import { externalHttp, literalCredential } from "../review.js";
 
@@ -56,9 +56,17 @@ export const rules: Record<string, Rule> = {
     category: "security",
     severity: "high",
     title: "Wildcard permission detected",
-    detail: "An Allow statement grants wildcard actions or principals.",
+    detail: "An Allow statement grants a wildcard action.",
     remediation:
-      "List the required actions and trusted principals explicitly, with resource and condition restrictions.",
+      "List the required actions explicitly, with resource and condition restrictions.",
+  },
+  IAM002: {
+    category: "security",
+    severity: "high",
+    title: "Policy allows any principal",
+    detail: "An Allow statement sets Principal to any AWS principal.",
+    remediation:
+      "Name the trusted principals explicitly instead of allowing any principal.",
   },
   DATA001: {
     category: "security",
@@ -724,6 +732,172 @@ function checkTerraformLiterals(
 }
 
 const exactSameFileRef = /^\$\{(var|local)\.([A-Za-z_][A-Za-z0-9_]*)\}$/;
+const interpolationPiece = /\$\{(var|local)\.([A-Za-z_][A-Za-z0-9_]*)\}/g;
+const interpolationOnly = /^(\$\{(?:var|local)\.[A-Za-z_][A-Za-z0-9_]*\})+$/;
+
+function sameFileText(
+  kind: string,
+  name: string,
+  sameFile: {
+    vars: Map<string, string | boolean | number>;
+    locals: Map<string, string | boolean | number>;
+  },
+): string | undefined {
+  const literal = (kind === "var" ? sameFile.vars : sameFile.locals).get(name);
+  if (typeof literal === "string" || typeof literal === "number" || typeof literal === "boolean")
+    return String(literal);
+  return undefined;
+}
+
+function resolveInterpolationString(
+  value: string,
+  sameFile: {
+    vars: Map<string, string | boolean | number>;
+    locals: Map<string, string | boolean | number>;
+  },
+): string | undefined {
+  const trimmed = value.trim();
+  if (!interpolationOnly.test(trimmed)) return undefined;
+  let count = 0;
+  let failed = false;
+  const text = trimmed.replace(interpolationPiece, (_full, kind: string, name: string) => {
+    count += 1;
+    const part = sameFileText(kind, name, sameFile);
+    if (part === undefined) {
+      failed = true;
+      return "";
+    }
+    return part;
+  });
+  if (failed || count < 2) return undefined;
+  return text;
+}
+
+function splitCallArguments(source: string): string[] | undefined {
+  const args: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | null = null;
+  let depth = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (quote) {
+      current += char;
+      if (char === "\\" && index + 1 < source.length) {
+        current += source[index + 1];
+        index += 1;
+        continue;
+      }
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === "(" || char === "[" || char === "{") {
+      depth += 1;
+      current += char;
+      continue;
+    }
+    if (char === ")" || char === "]" || char === "}") {
+      if (depth === 0) return undefined;
+      depth -= 1;
+      current += char;
+      continue;
+    }
+    if (char === "," && depth === 0) {
+      args.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (quote || depth !== 0) return undefined;
+  if (current.trim() !== "") args.push(current.trim());
+  return args;
+}
+
+function unquoteHcl(token: string): string | undefined {
+  if (token.length < 2) return undefined;
+  const quote = token[0];
+  if ((quote !== '"' && quote !== "'") || token[token.length - 1] !== quote) return undefined;
+  const body = token.slice(1, -1);
+  return quote === '"'
+    ? body.replace(/\\n/g, "\n").replace(/\\"/g, '"').replace(/\\\\/g, "\\")
+    : body.replace(/\\'/g, "'").replace(/\\\\/g, "\\");
+}
+
+function resolveFormatArgument(
+  token: string,
+  sameFile: {
+    vars: Map<string, string | boolean | number>;
+    locals: Map<string, string | boolean | number>;
+  },
+): string | undefined {
+  const literal = unquoteHcl(token);
+  if (literal !== undefined) return literal;
+  if (/^-?\d+(?:\.\d+)?$/.test(token) || token === "true" || token === "false") return token;
+  const ref = /^(var|local)\.([A-Za-z_][A-Za-z0-9_]*)$/.exec(token);
+  if (!ref) return undefined;
+  return sameFileText(ref[1], ref[2], sameFile);
+}
+
+function applyPercentS(format: string, args: string[]): string | undefined {
+  let index = 0;
+  let text = "";
+  for (let cursor = 0; cursor < format.length; cursor += 1) {
+    if (format[cursor] !== "%") {
+      text += format[cursor];
+      continue;
+    }
+    const verb = format[cursor + 1];
+    if (verb === "%") {
+      text += "%";
+      cursor += 1;
+      continue;
+    }
+    if (verb !== "s" || index >= args.length) return undefined;
+    text += args[index];
+    index += 1;
+    cursor += 1;
+  }
+  return text;
+}
+
+function resolveFormatCall(
+  value: string,
+  sameFile: {
+    vars: Map<string, string | boolean | number>;
+    locals: Map<string, string | boolean | number>;
+  },
+): string | undefined {
+  const wrapped = /^\$\{format\(([\s\S]*)\)\}$/.exec(value.trim());
+  if (!wrapped) return undefined;
+  const args = splitCallArguments(wrapped[1]);
+  if (!args || args.length === 0) return undefined;
+  const resolved: string[] = [];
+  for (const arg of args) {
+    const part = resolveFormatArgument(arg, sameFile);
+    if (part === undefined) return undefined;
+    resolved.push(part);
+  }
+  return applyPercentS(resolved[0], resolved.slice(1));
+}
+
+function noteResolvedLiteral(
+  literal: string,
+  path: Path,
+  sameFile: { declaredSecrets: Set<string> },
+  suppressed: Set<string>,
+  referencedSecrets: Set<string>,
+): void {
+  if (literal.trim() === "") return;
+  const key = [...path].reverse().find((part) => typeof part === "string");
+  if (sameFile.declaredSecrets.has(literal)) suppressed.add(path.join("."));
+  else if (typeof key === "string" && secretAssignmentName(key))
+    referencedSecrets.add(path.join("."));
+}
 
 function sameFileLiteral(
   value: unknown,
@@ -776,16 +950,24 @@ function resolveSameFileRefs(
 ): unknown {
   if (typeof value === "string") {
     const match = exactSameFileRef.exec(value.trim());
-    if (!match) return value;
-    const literal = (match[1] === "var" ? sameFile.vars : sameFile.locals).get(match[2]);
-    if (literal === undefined) return value;
-    if (typeof literal === "string" && literal.trim() !== "") {
-      const key = [...path].reverse().find((part) => typeof part === "string");
-      if (sameFile.declaredSecrets.has(literal)) suppressed.add(path.join("."));
-      else if (typeof key === "string" && secretAssignmentName(String(key)))
-        referencedSecrets.add(path.join("."));
+    if (match) {
+      const literal = (match[1] === "var" ? sameFile.vars : sameFile.locals).get(match[2]);
+      if (literal === undefined) return value;
+      if (typeof literal === "string")
+        noteResolvedLiteral(literal, path, sameFile, suppressed, referencedSecrets);
+      return literal;
     }
-    return literal;
+    const concatenated = resolveInterpolationString(value, sameFile);
+    if (concatenated !== undefined) {
+      noteResolvedLiteral(concatenated, path, sameFile, suppressed, referencedSecrets);
+      return concatenated;
+    }
+    const formatted = resolveFormatCall(value, sameFile);
+    if (formatted !== undefined) {
+      noteResolvedLiteral(formatted, path, sameFile, suppressed, referencedSecrets);
+      return formatted;
+    }
+    return value;
   }
   if (Array.isArray(value)) {
     value.forEach((item, index) => {
@@ -916,6 +1098,41 @@ function checkCompose(resource: Resource, check: Check): void {
   check("NET001", array(service.ports).some(composePortIsPublic), ["ports"]);
 }
 
+function statementEffectAllows(body: Record<string, unknown>): boolean {
+  const effect = body.Effect ?? body.effect;
+  if (effect == null || String(effect).trim() === "") return true;
+  return String(effect).trim().toLowerCase() === "allow";
+}
+
+function principalAllowsAnyone(value: unknown): boolean {
+  if (typeof value === "string") return value.trim() === "*";
+  if (Array.isArray(value)) return value.some((item) => principalAllowsAnyone(item));
+  if (value && typeof value === "object")
+    return Object.values(value).some((item) => principalAllowsAnyone(item));
+  return false;
+}
+
+function actionIncludesWildcard(value: unknown): boolean {
+  return array(value).some((item) => typeof item === "string" && item.includes("*"));
+}
+
+function checkInlinePolicy(document: unknown, check: Check, path: Path): void {
+  const root = object(document);
+  const statements = root.Statement ?? root.statement;
+  if (!Array.isArray(statements) && (statements == null || typeof statements !== "object")) return;
+  for (const statement of array(statements)) {
+    const body = object(statement);
+    if (!statementEffectAllows(body)) continue;
+    check(
+      "IAM001",
+      actionIncludesWildcard(body.Action ?? body.action ?? body.Actions ?? body.actions),
+      path,
+    );
+    const principal = body.Principal ?? body.principal ?? body.Principals ?? body.principals;
+    if (principal !== undefined) check("IAM002", principalAllowsAnyone(principal), path);
+  }
+}
+
 function checkCloud(
   resource: Resource,
   resources: Resource[],
@@ -954,43 +1171,31 @@ function checkCloud(
         [...prefix, ...at],
       );
     }
-    if (
-      /^(?:Action|Principal|actions|principals)$/.test(key) &&
-      (parent.Effect === "Allow" || parent.effect === "Allow")
-    ) {
-      const values =
-        typeof child === "object" && !Array.isArray(child)
-          ? Object.values(object(child)).flatMap(array)
-          : array(child);
-      check(
-        "IAM001",
-        values.some((item) => typeof item === "string" && item.includes("*")),
-        [...prefix, ...at],
-      );
+    if (/^(?:Action|actions)$/.test(key) && statementEffectAllows(parent)) {
+      check("IAM001", actionIncludesWildcard(child), [...prefix, ...at]);
     }
-    if (
-      /^(?:policy|assume_role_policy|PolicyDocument)$/.test(key) &&
-      typeof child === "string" &&
-      child.trimStart().startsWith("{")
-    ) {
-      try {
-        const document = JSON.parse(child);
-        for (const statement of array(object(document).Statement)) {
-          const s = object(statement);
-          check(
-            "IAM001",
-            s.Effect === "Allow" &&
-              [
-                ...array(s.Action),
-                ...array(s.Principal),
-                ...Object.values(object(s.Principal)).flatMap(array),
-              ].some((v) => typeof v === "string" && v.includes("*")),
-            [...prefix, ...at],
-          );
+    if (/^(?:Principal|principals)$/.test(key) && statementEffectAllows(parent)) {
+      check("IAM002", principalAllowsAnyone(child), [...prefix, ...at]);
+    }
+    if (typeof child === "string") {
+      const encoded = child.trim().startsWith("${jsonencode(")
+        ? terraformJsonencodeValue(child)
+        : undefined;
+      let parsed: unknown;
+      if (
+        encoded === undefined &&
+        /^(?:policy|assume_role_policy|PolicyDocument)$/.test(key) &&
+        child.trimStart().startsWith("{")
+      ) {
+        try {
+          parsed = JSON.parse(child);
+        } catch {
+          parsed = undefined;
         }
-      } catch {
-        /* Nonliteral policies are covered by the expression warning. */
       }
+      const document = encoded ?? parsed;
+      if (document !== undefined)
+        checkInlinePolicy(document, check, [...prefix, ...at]);
     }
     if (
       /^(?:instance_type|machine_type|vm_size|InstanceType|DBInstanceClass|instance_class)$/.test(
