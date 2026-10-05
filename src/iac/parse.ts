@@ -16,7 +16,9 @@ export type IacFormat =
   | "gitlab"
   | "azure-pipelines"
   | "cloudbuild"
-  | "tfvars";
+  | "tfvars"
+  | "serverless"
+  | "iam";
 export type Path = (string | number)[];
 export type Location = { line: number; column: number; path: string };
 export type Resource = {
@@ -71,6 +73,7 @@ export function looksLikeIac(content: string): boolean {
       const value = object(JSON.parse(content));
       if (value.resource || value.Resources || (value.apiVersion && value.kind))
         return true;
+      if (looksLikeIamPolicy(content)) return true;
     } catch {
       /* Other format detection still applies to incomplete input. */
     }
@@ -93,7 +96,9 @@ export function looksLikeIac(content: string): boolean {
     looksLikeBicep(content) ||
     looksLikeArm(content) ||
     looksLikePipeline(content) !== undefined ||
-    looksLikeTfvars(content)
+    looksLikeTfvars(content) ||
+    looksLikeServerless(content) ||
+    looksLikeIamPolicy(content)
   );
 }
 
@@ -201,6 +206,9 @@ export function looksLikePulumiYaml(content: string): boolean {
   );
 }
 
+const terraformExpressionWarning =
+  "Terraform expressions are not evaluated. Findings use literal values and declared settings.";
+
 export function parseIac(
   content: string,
   requested: IacFormat | "auto" = "auto",
@@ -232,6 +240,18 @@ export function parseIac(
     (requested === "auto" && looksLikeHelm(content))
   ) {
     return parseHelm(content);
+  }
+  if (
+    requested === "serverless" ||
+    (requested === "auto" && looksLikeServerless(content))
+  ) {
+    return parseServerless(content);
+  }
+  if (
+    requested === "iam" ||
+    (requested === "auto" && looksLikeIamPolicy(content))
+  ) {
+    return parseIamPolicy(content);
   }
   const pipeline =
     requested === "gitlab" ||
@@ -353,10 +373,33 @@ export function parseIac(
       warnings.push(
         "External modules are not expanded. The module body was not loaded, and the module source is not fetched or evaluated.",
       );
+    const localBlocks = terraformLocalBlocks(data);
+    const localDeclarations = [
+      ...searchable.matchAll(/\blocals\s*(?:"[^"]+"\s*)?\{/g),
+    ];
+    localBlocks.forEach((block, index) => {
+      const offset = localDeclarations[index]?.index ?? 0;
+      const before = content.slice(0, offset);
+      resources.push({
+        id: `locals.${index + 1}`,
+        type: "terraform:local",
+        value: block,
+        locate: (path = []) => ({
+          line: before.split("\n").length,
+          column: offset - before.lastIndexOf("\n"),
+          path: ["locals", index, ...path].join("."),
+        }),
+      });
+    });
     if (JSON.stringify(data).includes("${"))
-      warnings.push(
-        "Terraform expressions are not evaluated. Findings use literal values and declared settings.",
-      );
+      warnings.push(terraformExpressionWarning);
+    if (
+      localBlocks.length > 0 &&
+      !warnings.some((warning) =>
+        warning.includes("expressions are not evaluated"),
+      )
+    )
+      warnings.push(terraformExpressionWarning);
     if (!resources.some((item) => item.type !== "terraform:module" && item.type !== "terraform:variable"))
       warnings.push(
         "No resource declarations found. Data sources and outputs are not scanned as resources.",
@@ -564,7 +607,7 @@ export function parseIac(
   }
   if (!format)
     throw new ScanInputError(
-      "No IaC document found. Choose Terraform, CloudFormation, Kubernetes, Pulumi, Docker Compose, a Dockerfile, a GitHub Actions workflow, a Helm template, an Ansible playbook, Bicep, or an ARM template.",
+      "No IaC document found. Choose Terraform, CloudFormation, Kubernetes, Pulumi, Docker Compose, a Dockerfile, a GitHub Actions workflow, a Helm template, an Ansible playbook, Bicep, an ARM template, Serverless Framework, or a standalone IAM policy.",
     );
   if (!resources.length)
     warnings.push("No resources found in the submitted document.");
@@ -887,7 +930,7 @@ function cloudBuildShape(content: string): boolean {
 }
 
 function looksLikePipeline(content: string): PipelineFormat | undefined {
-  if (stolenPipelineInput(content)) return undefined;
+  if (stolenPipelineInput(content) || looksLikeServerless(content)) return undefined;
   const visible = maskIaCComments(content);
   if (azurePipelineShape(visible)) return "azure-pipelines";
   if (gitlabShape(visible)) return "gitlab";
@@ -1643,4 +1686,240 @@ function parseAzure(content: string, format: "bicep" | "arm"): ParsedIac {
     ],
     warnings: [azureExpressionWarning],
   };
+}
+
+function terraformLocalBlocks(data: unknown): Record<string, unknown>[] {
+  const raw = object(data).locals;
+  if (Array.isArray(raw)) return raw.map((block) => object(block));
+  if (raw && typeof raw === "object") {
+    return Object.values(object(raw)).flatMap((blocks) =>
+      array(blocks).map((block) => object(block)),
+    );
+  }
+  return [];
+}
+
+export function looksLikeServerless(content: string): boolean {
+  if (looksLikeGithubWorkflow(content) || looksLikeCompose(content)) return false;
+  if (topLevelKey(content, "apiVersion") && topLevelKey(content, "kind"))
+    return false;
+  if (!topLevelKey(content, "service") || !topLevelKey(content, "provider"))
+    return false;
+  return topLevelKey(content, "functions") || topLevelKey(content, "plugins");
+}
+
+export function looksLikeIamPolicy(content: string): boolean {
+  const trimmed = content.trim();
+  if (!trimmed.startsWith("{")) return false;
+  let value: unknown;
+  try {
+    value = JSON.parse(trimmed);
+  } catch {
+    return false;
+  }
+  const root = object(value);
+  if (typeof root.AWSTemplateFormatVersion === "string") return false;
+  if ("resource" in root) return false;
+  const version = root.Version ?? root.version;
+  if (typeof version !== "string" || !version.includes("2012-10-17"))
+    return false;
+  const statement = root.Statement ?? root.statement;
+  return Array.isArray(statement);
+}
+
+const serverlessWarning =
+  "The Serverless Framework config is not executed. Conditions are not evaluated.";
+const iamPolicyWarning =
+  "The IAM policy is not executed. Conditions are not evaluated.";
+
+function serverlessShapeError(): string {
+  return "Serverless Framework config requires top-level service and provider, plus functions or plugins.";
+}
+
+function iamShapeError(): string {
+  return "An IAM policy requires Version 2012-10-17 and a Statement array.";
+}
+
+function effectAllows(body: Record<string, unknown>): boolean {
+  const effect = body.Effect ?? body.effect;
+  if (effect == null || String(effect).trim() === "") return true;
+  return String(effect).trim().toLowerCase() === "allow";
+}
+
+function actionIsOnlyWildcard(body: Record<string, unknown>): boolean {
+  const action = body.Action ?? body.action ?? body.actions ?? body.Actions;
+  if (typeof action === "string") return action.trim() === "*";
+  return (
+    Array.isArray(action) &&
+    action.length > 0 &&
+    action.every((item) => typeof item === "string" && item.trim() === "*")
+  );
+}
+
+function serverlessReference(value: string): boolean {
+  return /^\$\{[\s\S]+\}$/.test(value.trim());
+}
+
+type YamlPath = (string | number)[];
+
+function yamlLocation(
+  doc: { getIn: (path: YamlPath, keepScalar?: boolean) => unknown; range?: number[] },
+  lines: LineCounter,
+  path: YamlPath,
+): Location {
+  const node = doc.getIn(path, true) as { range?: number[] } | undefined;
+  const position = lines.linePos(node?.range?.[0] ?? doc.range?.[0] ?? 0);
+  return {
+    line: position.line,
+    column: position.col,
+    path: path.join("."),
+  };
+}
+
+function statementGroups(root: Record<string, unknown>): { path: YamlPath; statements: unknown[] }[] {
+  const groups: { path: YamlPath; statements: unknown[] }[] = [];
+  const seen = new Set<unknown>();
+  const add = (statements: unknown, path: YamlPath) => {
+    if (!Array.isArray(statements) || seen.has(statements)) return;
+    seen.add(statements);
+    groups.push({ path, statements });
+  };
+  const provider = object(root.provider);
+  add(provider.iamRoleStatements, ["provider", "iamRoleStatements"]);
+  add(root.iamRoleStatements, ["iamRoleStatements"]);
+  add(object(object(provider.iam).role).statements, ["provider", "iam", "role", "statements"]);
+  add(object(object(root.iam).role).statements, ["iam", "role", "statements"]);
+  if (Array.isArray(provider.iam)) add(provider.iam, ["provider", "iam"]);
+  else add(object(provider.iam).statements, ["provider", "iam", "statements"]);
+  return groups;
+}
+
+function parseServerless(content: string): ParsedIac {
+  if (!looksLikeServerless(content)) throw new ScanInputError(serverlessShapeError());
+  const lines = new LineCounter();
+  let documents;
+  try {
+    documents = parseAllDocuments(content, {
+      lineCounter: lines,
+      prettyErrors: false,
+    });
+  } catch {
+    throw new ScanInputError(serverlessShapeError());
+  }
+  const doc = documents.find((item) => item.toJS() != null);
+  if (!doc || doc.errors.length) throw new ScanInputError(serverlessShapeError());
+  let data: unknown;
+  try {
+    data = doc.toJS({ maxAliasCount: 0 });
+  } catch {
+    throw new ScanInputError(
+      "YAML aliases are not supported. Expand anchors before scanning.",
+    );
+  }
+  const root = object(data);
+  if (
+    root.service == null ||
+    root.provider == null ||
+    (root.functions == null && root.plugins == null)
+  )
+    throw new ScanInputError(serverlessShapeError());
+  const resources: Resource[] = [];
+  let iamCount = 0;
+  for (const group of statementGroups(root)) {
+    group.statements.forEach((statement, index) => {
+      const body = object(statement);
+      if (!effectAllows(body) || !actionIsOnlyWildcard(body)) return;
+      iamCount += 1;
+      const path = [...group.path, index, "Action"];
+      resources.push({
+        id: `serverless.iam.${iamCount}`,
+        type: "serverless:iam",
+        value: { wildcard: true },
+        locate: () => yamlLocation(doc, lines, path),
+      });
+    });
+  }
+  if (iamCount === 0) {
+    resources.push({
+      id: "serverless.iam",
+      type: "serverless:iam",
+      value: { wildcard: false },
+      locate: () => yamlLocation(doc, lines, ["provider", "iamRoleStatements"]),
+    });
+  }
+  const envHits: { path: YamlPath; key: string; value: unknown }[] = [];
+  for (const [key, value] of Object.entries(object(object(root.provider).environment))) {
+    if (secretVariableName(key))
+      envHits.push({ path: ["provider", "environment", key], key, value });
+  }
+  for (const [name, raw] of Object.entries(object(root.functions))) {
+    for (const [key, value] of Object.entries(object(object(raw).environment))) {
+      if (secretVariableName(key))
+        envHits.push({ path: ["functions", name, "environment", key], key, value });
+    }
+  }
+  if (envHits.length === 0) {
+    resources.push({
+      id: "serverless.environment",
+      type: "serverless:env",
+      value: { literal: false },
+      locate: () => yamlLocation(doc, lines, ["provider", "environment"]),
+    });
+  } else {
+    envHits.forEach((hit, index) => {
+      const literal =
+        typeof hit.value === "string" &&
+        hit.value.trim() !== "" &&
+        !serverlessReference(hit.value);
+      resources.push({
+        id: `serverless.env.${index + 1}`,
+        type: "serverless:env",
+        value: { literal },
+        locate: () => yamlLocation(doc, lines, hit.path),
+      });
+    });
+  }
+  return { format: "serverless", resources, warnings: [serverlessWarning] };
+}
+
+function parseIamPolicy(content: string): ParsedIac {
+  if (!looksLikeIamPolicy(content)) throw new ScanInputError(iamShapeError());
+  let root: Record<string, unknown>;
+  try {
+    root = object(JSON.parse(content));
+  } catch {
+    throw new ScanInputError(iamShapeError());
+  }
+  const statements = array(root.Statement ?? root.statement);
+  const resources: Resource[] = [];
+  statements.forEach((statement, index) => {
+    const body = object(statement);
+    if (!effectAllows(body) || !actionIsOnlyWildcard(body)) return;
+    const line = iamStatementLine(content, index);
+    resources.push({
+      id: `iam.statement.${index + 1}`,
+      type: "iam:statement",
+      value: { wildcard: true },
+      locate: () => lineLocation(line, `Statement.${index}.Action`),
+    });
+  });
+  if (!resources.length) {
+    resources.push({
+      id: "iam.policy",
+      type: "iam:statement",
+      value: { wildcard: false },
+      locate: () => lineLocation(1, "Statement"),
+    });
+  }
+  return { format: "iam", resources, warnings: [iamPolicyWarning] };
+}
+
+function iamStatementLine(content: string, index: number): number {
+  const matches = [...content.matchAll(/"Statement"\s*:/g)];
+  const start = matches[0]?.index ?? 0;
+  const region = content.slice(start);
+  const actions = [...region.matchAll(/"Action"\s*:/g)];
+  const action = actions[index];
+  if (!action || action.index == null) return lineAt(content, start);
+  return lineAt(content, start + action.index);
 }
