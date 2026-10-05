@@ -424,6 +424,24 @@ export const rules: Record<string, Rule> = {
     remediation:
       "Pass the value from a secret store or leave the default empty. Do not commit a literal secret.",
   },
+  TF002: {
+    category: "security",
+    severity: "high",
+    title: "Secret assigned in a Terraform local",
+    detail:
+      "A Terraform local assigns a non-empty literal to a secret-like name.",
+    remediation:
+      "Pass the value from a secret store or a variable reference. Do not commit a literal secret in locals.",
+  },
+  SLS001: {
+    category: "security",
+    severity: "high",
+    title: "Secret assigned in serverless environment",
+    detail:
+      "A Serverless Framework environment entry assigns a non-empty literal to a secret-like name.",
+    remediation:
+      "Reference the value with a Serverless variable such as ${env:TOKEN}. Do not commit a literal secret.",
+  },
 };
 
 export function resourceFindings(
@@ -469,6 +487,18 @@ export function resourceFindings(
       format === "cloudbuild"
     ) {
       checkPipeline(resource, check);
+      continue;
+    }
+    if (format === "serverless") {
+      checkServerless(resource, check);
+      continue;
+    }
+    if (format === "iam") {
+      check("IAM001", resource.value.wildcard === true, ["Action"]);
+      continue;
+    }
+    if (resource.type === "terraform:local") {
+      checkTerraformLiterals(resource.value, "local", check, []);
       continue;
     }
     if (resource.type === "terraform:module") {
@@ -585,6 +615,13 @@ function checkPipeline(resource: Resource, check: Check): void {
     check("PIPE003", resource.value.present === true, ["privileged"]);
 }
 
+function checkServerless(resource: Resource, check: Check): void {
+  if (resource.type === "serverless:iam")
+    check("IAM001", resource.value.wildcard === true, ["Action"]);
+  else if (resource.type === "serverless:env")
+    check("SLS001", resource.value.literal === true, ["environment"]);
+}
+
 function terraformReference(value: string): boolean {
   const trimmed = value.trim();
   return trimmed.includes("${") || /^var\./.test(trimmed);
@@ -609,7 +646,7 @@ function moduleCidrExempt(name: string): boolean {
 
 function checkTerraformLiterals(
   value: unknown,
-  mode: "module" | "assignment",
+  mode: "module" | "assignment" | "local",
   check: Check,
   path: Path,
   name = "",
@@ -617,12 +654,14 @@ function checkTerraformLiterals(
   if (typeof value === "string" || typeof value === "boolean") {
     const open = value === "0.0.0.0/0" || value === "::/0";
     const exempt =
-      mode === "module" ? moduleCidrExempt(name) : name.toLowerCase() === "egress";
+      mode === "assignment" ? name.toLowerCase() === "egress" : moduleCidrExempt(name);
     if (typeof value === "string")
       check("NET001", open && name !== "" && !exempt, path);
     if (name === "publicly_accessible") check("DB001", value === true, path);
     if (mode === "assignment" && typeof value === "string" && secretAssignmentName(name))
       check("TF001", value.trim() !== "" && !terraformReference(value), path);
+    if (mode === "local" && typeof value === "string" && secretAssignmentName(name))
+      check("TF002", value.trim() !== "" && !terraformReference(value), path);
     return;
   }
   if (Array.isArray(value)) {

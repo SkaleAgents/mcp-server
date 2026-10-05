@@ -1376,3 +1376,234 @@ variable "egress" {
     assert.equal(variables.findings.some((finding) => finding.ruleId === "DB001"), false);
   });
 });
+
+describe("Terraform locals, Serverless Framework, and IAM policies", () => {
+  it("scans Terraform locals without evaluating expressions", () => {
+    const scan = scanIac(`locals {
+  cidr = "0.0.0.0/0"
+  destination = "::/0"
+  egress = "0.0.0.0/0"
+  ipv6_egress = "::/0"
+  publicly_accessible = true
+  password = "hunter2"
+  token = var.password
+  environment = "prod"
+  ok = "10.0.0.0/24"
+}
+# cidr = "0.0.0.0/0"
+`);
+    assert.equal(scan.format, "terraform");
+    assert.equal(scan.findings.filter((finding) => finding.ruleId === "NET001").length, 1);
+    assert.equal(
+      scan.findings.find((finding) => finding.ruleId === "NET001")?.title,
+      "Broad network exposure",
+    );
+    assert.equal(scan.findings.filter((finding) => finding.ruleId === "DB001").length, 1);
+    assert.equal(
+      scan.findings.find((finding) => finding.ruleId === "DB001")?.title,
+      "Database publicly accessible",
+    );
+    assert.equal(scan.findings.filter((finding) => finding.ruleId === "TF002").length, 1);
+    assert.equal(
+      scan.findings.find((finding) => finding.ruleId === "TF002")?.title,
+      "Secret assigned in a Terraform local",
+    );
+    assert.equal(
+      scan.warnings.filter((warning) => warning.includes("expressions are not evaluated")).length,
+      1,
+    );
+
+    const clear = scanIac(`locals {
+  cidr = "10.0.0.0/24"
+  environment = "prod"
+  password = var.password
+}
+# 0.0.0.0/0
+`);
+    assert.equal(clear.findings.length, 0);
+    assert.equal(
+      clear.warnings.filter((warning) => warning.includes("expressions are not evaluated")).length,
+      1,
+    );
+  });
+
+  it("scans Serverless Framework IAM and environment literals", () => {
+    const scan = scanIac(`service: billing
+provider:
+  name: aws
+  runtime: nodejs20.x
+  iamRoleStatements:
+    - Effect: Allow
+      Action: '*'
+      Resource: '*'
+    - Effect: Deny
+      Action: '*'
+      Resource: '*'
+  environment:
+    TOKEN: \${env:TOKEN}
+    password: hunter2
+    # api_key: hidden
+functions:
+  charge:
+    handler: handler.charge
+    environment:
+      api_key: \${self:custom.x}
+      secret: ""
+plugins:
+  - serverless-offline
+`);
+    assert.equal(scan.format, "serverless");
+    assert.equal(scan.findings.filter((finding) => finding.ruleId === "IAM001").length, 1);
+    assert.equal(
+      scan.findings.find((finding) => finding.ruleId === "IAM001")?.title,
+      "Wildcard permission detected",
+    );
+    assert.equal(scan.findings.filter((finding) => finding.ruleId === "SLS001").length, 1);
+    assert.equal(
+      scan.findings.find((finding) => finding.ruleId === "SLS001")?.title,
+      "Secret assigned in serverless environment",
+    );
+    assert.ok(scan.warnings.some((warning) => warning.includes("not executed")));
+    assert.ok(scan.warnings.some((warning) => warning.includes("Conditions are not evaluated")));
+
+    const roleStatements = scanIac(`service: billing
+provider:
+  name: aws
+  iam:
+    role:
+      statements:
+        - Action:
+            - '*'
+          Resource: '*'
+functions:
+  hello:
+    handler: handler.hello
+`, { format: "serverless" });
+    assert.equal(roleStatements.format, "serverless");
+    assert.equal(roleStatements.findings.filter((finding) => finding.ruleId === "IAM001").length, 1);
+
+    const specific = scanIac(`service: billing
+provider:
+  name: aws
+  iam:
+    statements:
+      - Effect: Allow
+        Action:
+          - s3:GetObject
+        Resource: '*'
+functions:
+  hello:
+    handler: handler.hello
+    environment:
+      NAME: web
+`);
+    assert.equal(specific.format, "serverless");
+    assert.equal(specific.findings.length, 0);
+  });
+
+  it("keeps nearby formats from being classified as Serverless or IAM", () => {
+    const github = scanIac(`on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+`);
+    assert.equal(github.format, "github");
+
+    const compose = scanIac(`services:
+  web:
+    image: nginx:1.27
+`);
+    assert.equal(compose.format, "compose");
+
+    const kubernetes = scanIac(`apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: web
+      image: nginx:1.27
+`);
+    assert.equal(kubernetes.format, "kubernetes");
+
+    const gitlab = scanIac(`image: node:20
+test:
+  script:
+    - npm test
+`);
+    assert.equal(gitlab.format, "gitlab");
+
+    const cloudBuild = scanIac(`steps:
+  - name: gcr.io/cloud-builders/gcloud
+    args: ['version']
+`);
+    assert.equal(cloudBuild.format, "cloudbuild");
+
+    const serverlessWithScript = scanIac(`service: app
+provider:
+  name: aws
+functions:
+  job:
+    handler: handler.main
+    image: node:20
+    script:
+      - echo hi
+`);
+    assert.equal(serverlessWithScript.format, "serverless");
+  });
+
+  it("scans a standalone IAM policy and ignores deny or specific actions", () => {
+    const scan = scanIac(`{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "*",
+      "Resource": "*"
+    },
+    {
+      "Effect": "Deny",
+      "Action": "*",
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject"],
+      "Resource": "*"
+    }
+  ]
+}`);
+    assert.equal(scan.format, "iam");
+    assert.equal(scan.findings.filter((finding) => finding.ruleId === "IAM001").length, 1);
+    assert.equal(
+      scan.findings.find((finding) => finding.ruleId === "IAM001")?.title,
+      "Wildcard permission detected",
+    );
+    assert.ok(scan.warnings.some((warning) => warning.includes("not executed")));
+    assert.ok(scan.warnings.some((warning) => warning.includes("Conditions are not evaluated")));
+
+    const listOnly = scanIac(JSON.stringify({
+      Version: "2012-10-17",
+      Statement: [{ Action: ["*"], Resource: "*" }],
+    }), { format: "iam" });
+    assert.equal(listOnly.findings.filter((finding) => finding.ruleId === "IAM001").length, 1);
+
+    const clear = scanIac(JSON.stringify({
+      Version: "2012-10-17",
+      Statement: [{ Effect: "Allow", Action: "s3:GetObject", Resource: "*" }],
+    }));
+    assert.equal(clear.format, "iam");
+    assert.equal(clear.findings.length, 0);
+
+    const cloudformation = scanIac(JSON.stringify({
+      AWSTemplateFormatVersion: "2010-09-09",
+      Resources: { Bucket: { Type: "AWS::S3::Bucket" } },
+    }));
+    assert.equal(cloudformation.format, "cloudformation");
+
+    const terraform = scanIac(JSON.stringify({
+      resource: { aws_s3_bucket: { logs: { bucket: "logs" } } },
+    }));
+    assert.equal(terraform.format, "terraform");
+  });
+});
