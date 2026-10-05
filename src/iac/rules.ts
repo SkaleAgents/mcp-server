@@ -450,6 +450,24 @@ export function resourceFindings(
 ): { findings: Finding[]; checked: Set<string> } {
   const findings: Finding[] = [];
   const checked = new Set<string>();
+  const sameFile = collectSameFileLiterals(resources);
+  const suppressedSecrets = new WeakMap<Resource, Set<string>>();
+  const moduleSecrets = new WeakMap<Resource, Set<string>>();
+  if (format === "terraform") {
+    for (const resource of resources) {
+      if (
+        resource.type === "terraform:variable" ||
+        resource.type === "terraform:local" ||
+        resource.type === "tfvars:assignment"
+      )
+        continue;
+      const suppressed = new Set<string>();
+      const referenced = new Set<string>();
+      resolveSameFileRefs(resource.value, sameFile, [], suppressed, referenced);
+      suppressedSecrets.set(resource, suppressed);
+      moduleSecrets.set(resource, referenced);
+    }
+  }
   for (const resource of resources) {
     const check = (id: string, condition: unknown, path: Path = []) => {
       checked.add(id);
@@ -495,6 +513,7 @@ export function resourceFindings(
     }
     if (format === "iam") {
       check("IAM001", resource.value.wildcard === true, ["Action"]);
+      check("NET001", resource.value.openSourceIp === true, ["Condition"]);
       continue;
     }
     if (resource.type === "terraform:local") {
@@ -502,7 +521,14 @@ export function resourceFindings(
       continue;
     }
     if (resource.type === "terraform:module") {
-      checkTerraformLiterals(resource.value, "module", check, []);
+      checkTerraformLiterals(
+        resource.value,
+        "module",
+        check,
+        [],
+        "",
+        moduleSecrets.get(resource),
+      );
       continue;
     }
     if (resource.type === "terraform:variable") {
@@ -531,7 +557,8 @@ export function resourceFindings(
         "SEC001",
         (credentialName.test(key) ||
           (key === "value" && credentialName.test(String(parent.name)))) &&
-          literalCredential(value),
+          literalCredential(value) &&
+          !suppressedSecrets.get(resource)?.has(path.join(".")),
         path,
       );
       check("SEC002", /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/.test(value), path);
@@ -551,8 +578,17 @@ export function resourceFindings(
     if (format === "kubernetes") checkKubernetes(resource, resources, check);
     else if (format === "compose") checkCompose(resource, check);
     else checkCloud(resource, resources, format, check);
+    const referencedSecrets = Object.getOwnPropertyDescriptor(
+      resource.value,
+      "__referencedSecrets",
+    )?.value;
+    if (Array.isArray(referencedSecrets)) {
+      for (const secretPath of referencedSecrets) {
+        if (Array.isArray(secretPath)) check("SEC001", true, secretPath as Path);
+      }
+    }
   }
-  return { findings, checked };
+  return { findings: dedupeSecretFindings(findings), checked };
 }
 
 type Check = (id: string, condition: unknown, path?: Path) => void;
@@ -616,9 +652,10 @@ function checkPipeline(resource: Resource, check: Check): void {
 }
 
 function checkServerless(resource: Resource, check: Check): void {
-  if (resource.type === "serverless:iam")
+  if (resource.type === "serverless:iam") {
     check("IAM001", resource.value.wildcard === true, ["Action"]);
-  else if (resource.type === "serverless:env")
+    check("NET001", resource.value.openSourceIp === true, ["Condition"]);
+  } else if (resource.type === "serverless:env")
     check("SLS001", resource.value.literal === true, ["environment"]);
 }
 
@@ -650,6 +687,7 @@ function checkTerraformLiterals(
   check: Check,
   path: Path,
   name = "",
+  referencedSecrets?: Set<string>,
 ): void {
   if (typeof value === "string" || typeof value === "boolean") {
     const open = value === "0.0.0.0/0" || value === "::/0";
@@ -662,18 +700,129 @@ function checkTerraformLiterals(
       check("TF001", value.trim() !== "" && !terraformReference(value), path);
     if (mode === "local" && typeof value === "string" && secretAssignmentName(name))
       check("TF002", value.trim() !== "" && !terraformReference(value), path);
+    if (mode === "module" && referencedSecrets?.has(path.join(".")))
+      check("SEC001", true, path);
     return;
   }
   if (Array.isArray(value)) {
     value.forEach((item, index) =>
-      checkTerraformLiterals(item, mode, check, [...path, index], name),
+      checkTerraformLiterals(
+        item,
+        mode,
+        check,
+        [...path, index],
+        name,
+        referencedSecrets,
+      ),
     );
     return;
   }
   if (value && typeof value === "object") {
     for (const [key, child] of Object.entries(value))
-      checkTerraformLiterals(child, mode, check, [...path, key], key);
+      checkTerraformLiterals(child, mode, check, [...path, key], key, referencedSecrets);
   }
+}
+
+const exactSameFileRef = /^\$\{(var|local)\.([A-Za-z_][A-Za-z0-9_]*)\}$/;
+
+function sameFileLiteral(
+  value: unknown,
+): string | boolean | number | undefined {
+  if (typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value === "string" && !value.includes("${")) return value;
+  return undefined;
+}
+
+function collectSameFileLiterals(resources: Resource[]): {
+  vars: Map<string, string | boolean | number>;
+  locals: Map<string, string | boolean | number>;
+  declaredSecrets: Set<string>;
+} {
+  const vars = new Map<string, string | boolean | number>();
+  const locals = new Map<string, string | boolean | number>();
+  const declaredSecrets = new Set<string>();
+  for (const resource of resources) {
+    if (resource.type === "terraform:variable") {
+      const name = String(resource.value.name ?? "");
+      const literal = sameFileLiteral(resource.value.default);
+      if (!name || literal === undefined) continue;
+      vars.set(name, literal);
+      if (typeof literal === "string" && literal.trim() !== "" && secretAssignmentName(name))
+        declaredSecrets.add(literal);
+    }
+    if (resource.type === "terraform:local") {
+      for (const [name, raw] of Object.entries(resource.value)) {
+        const literal = sameFileLiteral(raw);
+        if (literal === undefined) continue;
+        locals.set(name, literal);
+        if (typeof literal === "string" && literal.trim() !== "" && secretAssignmentName(name))
+          declaredSecrets.add(literal);
+      }
+    }
+  }
+  return { vars, locals, declaredSecrets };
+}
+
+function resolveSameFileRefs(
+  value: unknown,
+  sameFile: {
+    vars: Map<string, string | boolean | number>;
+    locals: Map<string, string | boolean | number>;
+    declaredSecrets: Set<string>;
+  },
+  path: Path,
+  suppressed: Set<string>,
+  referencedSecrets: Set<string>,
+): unknown {
+  if (typeof value === "string") {
+    const match = exactSameFileRef.exec(value.trim());
+    if (!match) return value;
+    const literal = (match[1] === "var" ? sameFile.vars : sameFile.locals).get(match[2]);
+    if (literal === undefined) return value;
+    if (typeof literal === "string" && literal.trim() !== "") {
+      const key = [...path].reverse().find((part) => typeof part === "string");
+      if (sameFile.declaredSecrets.has(literal)) suppressed.add(path.join("."));
+      else if (typeof key === "string" && secretAssignmentName(String(key)))
+        referencedSecrets.add(path.join("."));
+    }
+    return literal;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => {
+      value[index] = resolveSameFileRefs(
+        item,
+        sameFile,
+        [...path, index],
+        suppressed,
+        referencedSecrets,
+      );
+    });
+    return value;
+  }
+  if (value && typeof value === "object") {
+    for (const [key, child] of Object.entries(value)) {
+      if (key === "__referencedSecrets") continue;
+      (value as Record<string, unknown>)[key] = resolveSameFileRefs(
+        child,
+        sameFile,
+        [...path, key],
+        suppressed,
+        referencedSecrets,
+      );
+    }
+  }
+  return value;
+}
+
+function dedupeSecretFindings(findings: Finding[]): Finding[] {
+  const seen = new Set<string>();
+  return findings.filter((finding) => {
+    if (finding.ruleId !== "SEC001") return true;
+    const key = `${finding.ruleId}|${finding.resource}|${finding.location?.path ?? ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function checkAzure(resource: Resource, check: Check): void {

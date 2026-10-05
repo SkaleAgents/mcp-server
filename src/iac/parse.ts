@@ -207,7 +207,7 @@ export function looksLikePulumiYaml(content: string): boolean {
 }
 
 const terraformExpressionWarning =
-  "Terraform expressions are not evaluated. Findings use literal values and declared settings.";
+  "Same-file variable and local literals are resolved. Functions and other expressions are not evaluated.";
 
 export function parseIac(
   content: string,
@@ -535,13 +535,19 @@ export function parseIac(
         throw new ScanInputError(
           "CloudFormation requires a Resources mapping.",
         );
+      const parameters = cloudFormationParameterLiterals(root);
       for (const [name, raw] of Object.entries(object(root.Resources))) {
         const value = object(raw);
         if (typeof value.Type !== "string")
           throw new ScanInputError(
             "Each CloudFormation resource requires a Type.",
           );
-        add(name, value.Type, value, ["Resources", name]);
+        add(
+          name,
+          value.Type,
+          resolveCloudFormationRefs(value, parameters),
+          ["Resources", name],
+        );
       }
     } else if (format === "terraform") {
       if (
@@ -611,7 +617,14 @@ export function parseIac(
     );
   if (!resources.length)
     warnings.push("No resources found in the submitted document.");
-  if (/(?:!(?:Ref|Sub|GetAtt|If)\b|"(?:Ref|Fn::\w+)"\s*:|\$\{)/.test(content))
+  if (
+    format === "cloudformation" &&
+    /(?:!(?:Ref|Sub|GetAtt|If)\b|"(?:Ref|Fn::\w+)"\s*:|\bRef\s*:)/.test(content)
+  )
+    warnings.push(
+      "Same-file parameter defaults are resolved. Functions are not evaluated.",
+    );
+  else if (/(?:!(?:Ref|Sub|GetAtt|If)\b|"(?:Ref|Fn::\w+)"\s*:|\$\{)/.test(content))
     warnings.push(
       "Intrinsic functions and expressions are not evaluated. Only literal configuration is checked.",
     );
@@ -1688,6 +1701,112 @@ function parseAzure(content: string, format: "bicep" | "arm"): ParsedIac {
   };
 }
 
+function parameterNameIsSecret(name: string): boolean {
+  const normalized = name.replace(/-/g, "_");
+  return (
+    /(?:^|_)(?:password|passwd|secret|token)$/i.test(normalized) ||
+    /(?:^|_)(?:api_?key|auth_token|access_key|private_key)$/i.test(normalized) ||
+    /(?:password|passwd|secret|api[_-]?key|auth[_-]?token|access[_-]?key|private[_-]?key|token)$/i.test(
+      name,
+    )
+  );
+}
+
+function cloudFormationParameterLiterals(root: Record<string, unknown>): {
+  defaults: Map<string, string | boolean | number>;
+  secretNames: Set<string>;
+} {
+  const defaults = new Map<string, string | boolean | number>();
+  const secretNames = new Set<string>();
+  for (const [name, raw] of Object.entries(object(root.Parameters))) {
+    const body = object(raw);
+    if (!("Default" in body)) continue;
+    const value = body.Default;
+    if (typeof value !== "string" && typeof value !== "boolean" && typeof value !== "number")
+      continue;
+    defaults.set(name, value);
+    if (typeof value === "string" && value.trim() !== "" && parameterNameIsSecret(name))
+      secretNames.add(name);
+  }
+  return { defaults, secretNames };
+}
+
+function cloudFormationRefName(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const entries = Object.entries(value).filter(([key]) => key !== "__referencedSecrets");
+  if (entries.length !== 1) return undefined;
+  const [key, name] = entries[0];
+  if (key !== "Ref" || typeof name !== "string" || name.trim() === "") return undefined;
+  return name;
+}
+
+function cloudFormationIntrinsic(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.keys(value).some(
+    (key) => key === "Fn::Sub" || key === "Fn::Join" || key === "Fn::FindInMap" || key.startsWith("Fn::"),
+  );
+}
+
+function resolveCloudFormationRefs(
+  value: Record<string, unknown>,
+  parameters: { defaults: Map<string, string | boolean | number>; secretNames: Set<string> },
+): Record<string, unknown> {
+  const secretPaths: Path[] = [];
+  const resolved = resolveCloudFormationValue(value, parameters, [], secretPaths);
+  if (
+    secretPaths.length > 0 &&
+    resolved &&
+    typeof resolved === "object" &&
+    !Array.isArray(resolved)
+  ) {
+    Object.defineProperty(resolved, "__referencedSecrets", {
+      enumerable: false,
+      configurable: true,
+      value: secretPaths,
+    });
+  }
+  return object(resolved);
+}
+
+function resolveCloudFormationValue(
+  value: unknown,
+  parameters: { defaults: Map<string, string | boolean | number>; secretNames: Set<string> },
+  path: Path,
+  secretPaths: Path[],
+): unknown {
+  const ref = cloudFormationRefName(value);
+  if (ref) {
+    if (!parameters.defaults.has(ref)) return value;
+    const literal = parameters.defaults.get(ref);
+    if (
+      parameters.secretNames.has(ref) &&
+      typeof literal === "string" &&
+      literal.trim() !== ""
+    )
+      secretPaths.push(path);
+    return literal;
+  }
+  if (cloudFormationIntrinsic(value)) return value;
+  if (Array.isArray(value))
+    return value.map((item, index) =>
+      resolveCloudFormationValue(item, parameters, [...path, index], secretPaths),
+    );
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value)) {
+      if (key === "__referencedSecrets") continue;
+      out[key] = resolveCloudFormationValue(
+        child,
+        parameters,
+        [...path, key],
+        secretPaths,
+      );
+    }
+    return out;
+  }
+  return value;
+}
+
 function terraformLocalBlocks(data: unknown): Record<string, unknown>[] {
   const raw = object(data).locals;
   if (Array.isArray(raw)) return raw.map((block) => object(block));
@@ -1728,9 +1847,9 @@ export function looksLikeIamPolicy(content: string): boolean {
 }
 
 const serverlessWarning =
-  "The Serverless Framework config is not executed. Conditions are not evaluated.";
+  "The Serverless Framework config is not executed. Other condition operators are not evaluated.";
 const iamPolicyWarning =
-  "The IAM policy is not executed. Conditions are not evaluated.";
+  "The IAM policy is not executed. Other condition operators are not evaluated.";
 
 function serverlessShapeError(): string {
   return "Serverless Framework config requires top-level service and provider, plus functions or plugins.";
@@ -1744,6 +1863,28 @@ function effectAllows(body: Record<string, unknown>): boolean {
   const effect = body.Effect ?? body.effect;
   if (effect == null || String(effect).trim() === "") return true;
   return String(effect).trim().toLowerCase() === "allow";
+}
+
+const openSourceAddresses = new Set(["0.0.0.0/0", "::/0", "*"]);
+
+function conditionValueIsOpen(value: unknown): boolean {
+  if (typeof value === "string") return openSourceAddresses.has(value.trim());
+  if (Array.isArray(value)) return value.some((item) => conditionValueIsOpen(item));
+  return false;
+}
+
+function sourceAddressAllowsEveryone(body: Record<string, unknown>): boolean {
+  if (!effectAllows(body)) return false;
+  const condition = object(body.Condition ?? body.condition);
+  let ipAddress: unknown;
+  for (const [key, value] of Object.entries(condition)) {
+    if (key.toLowerCase() === "ipaddress") {
+      ipAddress = value;
+      break;
+    }
+  }
+  if (!ipAddress || typeof ipAddress !== "object" || Array.isArray(ipAddress)) return false;
+  return Object.values(object(ipAddress)).some((value) => conditionValueIsOpen(value));
 }
 
 function actionIsOnlyWildcard(body: Record<string, unknown>): boolean {
@@ -1828,13 +1969,15 @@ function parseServerless(content: string): ParsedIac {
   for (const group of statementGroups(root)) {
     group.statements.forEach((statement, index) => {
       const body = object(statement);
-      if (!effectAllows(body) || !actionIsOnlyWildcard(body)) return;
+      const wildcard = effectAllows(body) && actionIsOnlyWildcard(body);
+      const openSourceIp = sourceAddressAllowsEveryone(body);
+      if (!wildcard && !openSourceIp) return;
       iamCount += 1;
-      const path = [...group.path, index, "Action"];
+      const path = [...group.path, index, openSourceIp && !wildcard ? "Condition" : "Action"];
       resources.push({
         id: `serverless.iam.${iamCount}`,
         type: "serverless:iam",
-        value: { wildcard: true },
+        value: { wildcard, openSourceIp },
         locate: () => yamlLocation(doc, lines, path),
       });
     });
@@ -1894,13 +2037,21 @@ function parseIamPolicy(content: string): ParsedIac {
   const resources: Resource[] = [];
   statements.forEach((statement, index) => {
     const body = object(statement);
-    if (!effectAllows(body) || !actionIsOnlyWildcard(body)) return;
-    const line = iamStatementLine(content, index);
+    const wildcard = effectAllows(body) && actionIsOnlyWildcard(body);
+    const openSourceIp = sourceAddressAllowsEveryone(body);
+    if (!wildcard && !openSourceIp) return;
+    const line = iamStatementLine(content, index, openSourceIp && !wildcard ? "Condition" : "Action");
     resources.push({
       id: `iam.statement.${index + 1}`,
       type: "iam:statement",
-      value: { wildcard: true },
-      locate: () => lineLocation(line, `Statement.${index}.Action`),
+      value: { wildcard, openSourceIp },
+      locate: () =>
+        lineLocation(
+          line,
+          openSourceIp && !wildcard
+            ? `Statement.${index}.Condition`
+            : `Statement.${index}.Action`,
+        ),
     });
   });
   if (!resources.length) {
@@ -1914,12 +2065,16 @@ function parseIamPolicy(content: string): ParsedIac {
   return { format: "iam", resources, warnings: [iamPolicyWarning] };
 }
 
-function iamStatementLine(content: string, index: number): number {
+function iamStatementLine(
+  content: string,
+  index: number,
+  key: "Action" | "Condition" = "Action",
+): number {
   const matches = [...content.matchAll(/"Statement"\s*:/g)];
   const start = matches[0]?.index ?? 0;
   const region = content.slice(start);
-  const actions = [...region.matchAll(/"Action"\s*:/g)];
-  const action = actions[index];
-  if (!action || action.index == null) return lineAt(content, start);
-  return lineAt(content, start + action.index);
+  const keys = [...region.matchAll(new RegExp(`"${key}"\\s*:`, "g"))];
+  const hit = key === "Action" ? keys[index] : keys.find((item) => item.index != null);
+  if (!hit || hit.index == null) return lineAt(content, start);
+  return lineAt(content, start + hit.index);
 }
