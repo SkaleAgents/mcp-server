@@ -391,6 +391,39 @@ export const rules: Record<string, Rule> = {
     remediation:
       "Restrict the cidr or source to approved addresses.",
   },
+  PIPE001: {
+    category: "security",
+    severity: "medium",
+    title: "Unpinned container image",
+    detail:
+      "An image or step name uses the latest tag, or it has no tag and no digest.",
+    remediation: "Pin a release tag or an image digest.",
+  },
+  PIPE002: {
+    category: "security",
+    severity: "high",
+    title: "Pipeline prints a secret",
+    detail: "A script line echoes or prints a secret-like variable.",
+    remediation:
+      "Remove the printed secret from the script. Pass secrets through a variable the script does not print.",
+  },
+  PIPE003: {
+    category: "security",
+    severity: "critical",
+    title: "Elevated container privileges",
+    detail: "The pipeline sets privileged to true.",
+    remediation:
+      "Set privileged to false. Isolate workloads that genuinely require elevated privileges.",
+  },
+  TF001: {
+    category: "security",
+    severity: "high",
+    title: "Secret assigned in a Terraform variable",
+    detail:
+      "A Terraform variable default or tfvars assignment gives a non-empty literal to a secret-like name.",
+    remediation:
+      "Pass the value from a secret store or leave the default empty. Do not commit a literal secret.",
+  },
 };
 
 export function resourceFindings(
@@ -428,6 +461,36 @@ export function resourceFindings(
     }
     if (format === "bicep" || format === "arm") {
       checkAzure(resource, check);
+      continue;
+    }
+    if (
+      format === "gitlab" ||
+      format === "azure-pipelines" ||
+      format === "cloudbuild"
+    ) {
+      checkPipeline(resource, check);
+      continue;
+    }
+    if (resource.type === "terraform:module") {
+      checkTerraformLiterals(resource.value, "module", check, []);
+      continue;
+    }
+    if (resource.type === "terraform:variable") {
+      checkTerraformLiterals(
+        { [String(resource.value.name ?? "default")]: resource.value.default },
+        "assignment",
+        check,
+        ["default"],
+      );
+      continue;
+    }
+    if (format === "tfvars" || resource.type === "tfvars:assignment") {
+      checkTerraformLiterals(
+        { [String(resource.value.name ?? "value")]: resource.value.value },
+        "assignment",
+        check,
+        [],
+      );
       continue;
     }
     walk(resource.value, (key, value, path, parent) => {
@@ -511,6 +574,67 @@ function checkAnsible(resource: Resource, check: Check): void {
     check("ANS001", resource.value.present === true, ["become"]);
   else if (resource.type === "ansible:cidr")
     check("ANS002", resource.value.present === true, ["cidr"]);
+}
+
+function checkPipeline(resource: Resource, check: Check): void {
+  if (resource.type === "pipeline:image")
+    check("PIPE001", resource.value.unpinned === true, ["image"]);
+  else if (resource.type === "pipeline:script")
+    check("PIPE002", resource.value.printsSecret === true, ["script"]);
+  else if (resource.type === "pipeline:privileged")
+    check("PIPE003", resource.value.present === true, ["privileged"]);
+}
+
+function terraformReference(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed.includes("${") || /^var\./.test(trimmed);
+}
+
+function secretAssignmentName(name: string): boolean {
+  const normalized = name.replace(/-/g, "_");
+  return (
+    /(?:^|_)(?:password|passwd|secret|token)$/i.test(normalized) ||
+    /(?:^|_)(?:api_?key|auth_token|access_key|private_key)$/i.test(normalized)
+  );
+}
+
+function moduleCidrExempt(name: string): boolean {
+  const normalized = name.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  return (
+    normalized === "egress" ||
+    normalized === "destination" ||
+    normalized === "ipv6_egress"
+  );
+}
+
+function checkTerraformLiterals(
+  value: unknown,
+  mode: "module" | "assignment",
+  check: Check,
+  path: Path,
+  name = "",
+): void {
+  if (typeof value === "string" || typeof value === "boolean") {
+    const open = value === "0.0.0.0/0" || value === "::/0";
+    const exempt =
+      mode === "module" ? moduleCidrExempt(name) : name.toLowerCase() === "egress";
+    if (typeof value === "string")
+      check("NET001", open && name !== "" && !exempt, path);
+    if (name === "publicly_accessible") check("DB001", value === true, path);
+    if (mode === "assignment" && typeof value === "string" && secretAssignmentName(name))
+      check("TF001", value.trim() !== "" && !terraformReference(value), path);
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) =>
+      checkTerraformLiterals(item, mode, check, [...path, index], name),
+    );
+    return;
+  }
+  if (value && typeof value === "object") {
+    for (const [key, child] of Object.entries(value))
+      checkTerraformLiterals(child, mode, check, [...path, key], key);
+  }
 }
 
 function checkAzure(resource: Resource, check: Check): void {

@@ -1167,3 +1167,212 @@ resource db 'Microsoft.Sql/servers@2021-11-01' = {
     assert.equal(cloudformation.format, "cloudformation");
   });
 });
+
+describe("pipeline, module, and tfvars scanning", () => {
+  const pipelineWarning =
+    "The pipeline is not executed. Only literal text outside comments is checked.";
+
+  it("scans GitLab CI, Azure Pipelines, and Cloud Build without stealing other formats", () => {
+    const gitlab = scanIac(`stages:
+  - test
+image: nginx:latest
+# privileged: true
+test_job:
+  stage: test
+  image: node:20
+  script:
+    - echo hello
+    - echo $CI_JOB_TOKEN
+    - echo "\${secrets.TOKEN}"
+  services:
+    - name: nginx
+privileged: true
+`);
+    assert.equal(gitlab.format, "gitlab");
+    assert.ok(gitlab.warnings.includes(pipelineWarning));
+    assert.equal(
+      gitlab.findings.filter((finding) => finding.ruleId === "PIPE001").length,
+      1,
+    );
+    assert.equal(
+      gitlab.findings.find((finding) => finding.ruleId === "PIPE001")?.title,
+      "Unpinned container image",
+    );
+    assert.equal(
+      gitlab.findings.find((finding) => finding.ruleId === "PIPE001")?.severity,
+      "medium",
+    );
+    assert.equal(
+      gitlab.findings.filter((finding) => finding.ruleId === "PIPE002").length,
+      1,
+    );
+    assert.equal(
+      gitlab.findings.find((finding) => finding.ruleId === "PIPE002")?.title,
+      "Pipeline prints a secret",
+    );
+    assert.equal(
+      gitlab.findings.find((finding) => finding.ruleId === "PIPE002")?.severity,
+      "high",
+    );
+    assert.equal(
+      gitlab.findings.find((finding) => finding.ruleId === "PIPE003")?.title,
+      "Elevated container privileges",
+    );
+    assert.equal(
+      gitlab.findings.find((finding) => finding.ruleId === "PIPE003")?.severity,
+      "critical",
+    );
+
+    const clearGitlab = scanIac(
+      "stages:\n  - test\nimage: node:20\njob:\n  script:\n    - echo hello\n",
+      { format: "gitlab" },
+    );
+    assert.equal(clearGitlab.format, "gitlab");
+    assert.equal(
+      clearGitlab.findings.filter((finding) => finding.ruleId.startsWith("PIPE")).length,
+      0,
+    );
+
+    const azure = scanIac(`trigger:
+  - main
+pool:
+  vmImage: ubuntu-latest
+steps:
+  - script: echo hello
+  - bash: echo $(secretValue)
+    privileged: true
+container:
+  image: nginx:latest
+`);
+    assert.equal(azure.format, "azure-pipelines");
+    assert.ok(azure.warnings.includes(pipelineWarning));
+    assert.equal(azure.findings.some((finding) => finding.ruleId === "PIPE001"), true);
+    assert.equal(azure.findings.some((finding) => finding.ruleId === "PIPE002"), true);
+    assert.equal(azure.findings.some((finding) => finding.ruleId === "PIPE003"), true);
+    const clearAzure = scanIac(
+      "pool:\n  vmImage: ubuntu-latest\nsteps:\n  - script: echo hello\n",
+      { format: "azure-pipelines" },
+    );
+    assert.equal(clearAzure.findings.some((finding) => finding.title === "Pipeline prints a secret"), false);
+    assert.equal(clearAzure.findings.some((finding) => finding.title === "Unpinned container image"), false);
+
+    const cloudBuild = scanIac(`steps:
+  - name: nginx:latest
+    args: ['-c', 'echo $TOKEN']
+  - name: node:20
+    args: ['echo', 'hello']
+# privileged: true
+`);
+    assert.equal(cloudBuild.format, "cloudbuild");
+    assert.ok(cloudBuild.warnings.includes(pipelineWarning));
+    assert.equal(
+      cloudBuild.findings.filter((finding) => finding.ruleId === "PIPE001").length,
+      1,
+    );
+    assert.equal(
+      cloudBuild.findings.filter((finding) => finding.ruleId === "PIPE002").length,
+      1,
+    );
+    assert.equal(cloudBuild.findings.some((finding) => finding.ruleId === "PIPE003"), false);
+
+    const github = scanIac(`on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hello
+`);
+    assert.equal(github.format, "github");
+
+    const compose = scanIac("services:\n  web:\n    image: nginx:latest\n");
+    assert.equal(compose.format, "compose");
+    const kubernetes = scanIac(
+      "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: web\n      image: nginx:latest\n",
+    );
+    assert.equal(kubernetes.format, "kubernetes");
+    const helm = scanIac("apiVersion: v1\nkind: Pod\nmetadata:\n  name: {{ .Release.Name }}\n");
+    assert.equal(helm.format, "helm");
+    const ansible = scanIac("hosts: all\ntasks:\n  - name: ping\n    ping:\n");
+    assert.equal(ansible.format, "ansible");
+  });
+
+  it("scans Terraform module arguments without loading the module", () => {
+    const scan = scanIac(`module "edge" {
+  source = "./modules/edge"
+  cidr = "0.0.0.0/0"
+  publicly_accessible = true
+  egress = "0.0.0.0/0"
+  destination = "::/0"
+  ipv6_egress = "::/0"
+}
+module "clear" {
+  source = "./modules/clear"
+  # cidr = "0.0.0.0/0"
+  cidr = "10.0.0.0/24"
+}
+`);
+    assert.equal(scan.format, "terraform");
+    assert.ok(scan.warnings.some((warning) => warning.includes("module body was not loaded")));
+    assert.equal(scan.findings.filter((finding) => finding.ruleId === "NET001").length, 1);
+    assert.equal(
+      scan.findings.find((finding) => finding.ruleId === "NET001")?.title,
+      "Broad network exposure",
+    );
+    assert.equal(scan.findings.filter((finding) => finding.ruleId === "DB001").length, 1);
+    assert.equal(
+      scan.findings.find((finding) => finding.ruleId === "DB001")?.title,
+      "Database publicly accessible",
+    );
+  });
+
+  it("scans tfvars assignments and Terraform variable defaults", () => {
+    const tfvars = scanIac(`cidr = "0.0.0.0/0"
+egress = "::/0"
+publicly_accessible = true
+password = "hunter2"
+token = var.token
+empty = ""
+environment = "prod"
+# api_key = "hidden"
+ok = "10.0.0.0/24"
+`);
+    assert.equal(tfvars.format, "tfvars");
+    assert.equal(tfvars.findings.filter((finding) => finding.ruleId === "NET001").length, 1);
+    assert.equal(tfvars.findings.filter((finding) => finding.ruleId === "DB001").length, 1);
+    assert.equal(tfvars.findings.filter((finding) => finding.ruleId === "TF001").length, 1);
+    assert.equal(
+      tfvars.findings.find((finding) => finding.ruleId === "TF001")?.title,
+      "Secret assigned in a Terraform variable",
+    );
+    const requested = scanIac('environment = "prod"\n', { format: "tfvars" });
+    assert.equal(requested.format, "tfvars");
+    assert.equal(requested.findings.length, 0);
+
+    const variables = scanIac(`variable "password" {
+  default = "hunter2"
+}
+variable "cidr" {
+  default = "0.0.0.0/0"
+}
+variable "ok" {
+  default = "10.0.0.0/24"
+}
+variable "ref" {
+  default = var.password
+}
+variable "empty" {
+  default = ""
+}
+variable "environment" {
+  default = "prod"
+}
+variable "egress" {
+  default = "::/0"
+}
+`);
+    assert.equal(variables.format, "terraform");
+    assert.equal(variables.findings.filter((finding) => finding.ruleId === "TF001").length, 1);
+    assert.equal(variables.findings.filter((finding) => finding.ruleId === "NET001").length, 1);
+    assert.equal(variables.findings.some((finding) => finding.ruleId === "DB001"), false);
+  });
+});
