@@ -71,6 +71,11 @@ export function scanIac(content: string, options: ScanOptions = {}) {
             "HCL locations point to resource declarations; property paths identify the affected setting.",
           ]
         : []),
+      ...(parsed.format === "terraform" || parsed.format === "cloudformation"
+        ? [
+            "Same-file var, local, and CloudFormation parameter defaults are resolved. Functions, Fn::Sub, and module sources are not.",
+          ]
+        : []),
     ],
   };
 }

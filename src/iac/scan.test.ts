@@ -1464,7 +1464,11 @@ plugins:
       "Secret assigned in serverless environment",
     );
     assert.ok(scan.warnings.some((warning) => warning.includes("not executed")));
-    assert.ok(scan.warnings.some((warning) => warning.includes("Conditions are not evaluated")));
+    assert.ok(
+      scan.warnings.some((warning) =>
+        warning.includes("Other condition operators are not evaluated"),
+      ),
+    );
 
     const roleStatements = scanIac(`service: billing
 provider:
@@ -1580,7 +1584,11 @@ functions:
       "Wildcard permission detected",
     );
     assert.ok(scan.warnings.some((warning) => warning.includes("not executed")));
-    assert.ok(scan.warnings.some((warning) => warning.includes("Conditions are not evaluated")));
+    assert.ok(
+      scan.warnings.some((warning) =>
+        warning.includes("Other condition operators are not evaluated"),
+      ),
+    );
 
     const listOnly = scanIac(JSON.stringify({
       Version: "2012-10-17",
@@ -1605,5 +1613,302 @@ functions:
       resource: { aws_s3_bucket: { logs: { bucket: "logs" } } },
     }));
     assert.equal(terraform.format, "terraform");
+  });
+});
+
+describe("same-file references and open IAM source addresses", () => {
+  it("resolves a same-file Terraform variable or local used as a CIDR", () => {
+    const open = scanIac(`variable "cidr" {
+  default = "0.0.0.0/0"
+}
+resource "aws_security_group" "web" {
+  ingress {
+    cidr_blocks = [var.cidr]
+  }
+}
+`);
+    assert.equal(open.format, "terraform");
+    assert.equal(
+      open.findings.filter((finding) => finding.title === "Broad network exposure").length > 0,
+      true,
+    );
+    assert.ok(
+      open.findings.some(
+        (finding) =>
+          finding.ruleId === "NET001" && finding.location?.path.includes("cidr_blocks"),
+      ),
+    );
+    assert.equal(
+      open.warnings.filter((warning) => warning.includes("are resolved")).length,
+      1,
+    );
+
+    const quoted = scanIac(`locals {
+  cidr = "0.0.0.0/0"
+}
+resource "aws_security_group" "web" {
+  ingress {
+    cidr_blocks = ["\${local.cidr}"]
+  }
+}
+`);
+    assert.ok(
+      quoted.findings.some(
+        (finding) =>
+          finding.ruleId === "NET001" && finding.location?.path.includes("cidr_blocks"),
+      ),
+    );
+
+    const clear = scanIac(`variable "cidr" {
+  default = "10.0.0.0/24"
+}
+resource "aws_security_group" "web" {
+  ingress {
+    cidr_blocks = [var.cidr]
+  }
+}
+# cidr_blocks = [var.cidr]
+# default = "0.0.0.0/0"
+`);
+    assert.equal(clear.findings.filter((finding) => finding.ruleId === "NET001").length, 0);
+
+    const unknown = scanIac(`resource "aws_security_group" "web" {
+  ingress {
+    cidr_blocks = [var.missing]
+  }
+}
+`);
+    assert.equal(unknown.findings.filter((finding) => finding.ruleId === "NET001").length, 0);
+
+    const called = scanIac(`variable "cidr" {
+  default = "10.0.0.0/16"
+}
+resource "aws_security_group" "web" {
+  ingress {
+    cidr_blocks = [cidrsubnet(var.cidr, 8, 1)]
+  }
+}
+`);
+    assert.equal(called.findings.filter((finding) => finding.ruleId === "NET001").length, 0);
+  });
+
+  it("applies a resolved secret once and a resolved public database flag", () => {
+    const secret = scanIac(`variable "password" {
+  default = "hunter2"
+}
+resource "aws_db_instance" "db" {
+  password = var.password
+}
+`);
+    const secretFindings = secret.findings.filter(
+      (finding) => finding.ruleId === "TF001" || finding.ruleId === "SEC001" || finding.ruleId === "TF002",
+    );
+    assert.equal(secretFindings.length, 1);
+    assert.equal(secretFindings[0]?.title, "Secret assigned in a Terraform variable");
+
+    const attribute = scanIac(`variable "db_pass" {
+  default = "hunter2"
+}
+resource "aws_db_instance" "db" {
+  password = var.db_pass
+}
+`);
+    assert.equal(attribute.findings.filter((finding) => finding.ruleId === "SEC001").length, 1);
+    assert.equal(
+      attribute.findings.find((finding) => finding.ruleId === "SEC001")?.title,
+      "Hardcoded credential-like value",
+    );
+
+    const database = scanIac(`variable "open" {
+  default = true
+}
+resource "aws_db_instance" "db" {
+  publicly_accessible = var.open
+}
+`);
+    assert.equal(database.findings.filter((finding) => finding.ruleId === "DB001").length, 1);
+    assert.equal(
+      database.findings.find((finding) => finding.ruleId === "DB001")?.title,
+      "Database publicly accessible",
+    );
+  });
+
+  it("resolves a same-file CloudFormation parameter default", () => {
+    const clear = scanIac(`AWSTemplateFormatVersion: "2010-09-09"
+Parameters:
+  Cidr:
+    Type: String
+    Default: 10.0.0.0/16
+Resources:
+  Sg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: web
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp:
+            Ref: Cidr
+`);
+    assert.equal(clear.format, "cloudformation");
+    assert.equal(clear.findings.filter((finding) => finding.ruleId === "NET001").length, 0);
+    assert.equal(
+      clear.warnings.filter((warning) => warning.includes("parameter defaults are resolved")).length,
+      1,
+    );
+
+    const open = scanIac(JSON.stringify({
+      AWSTemplateFormatVersion: "2010-09-09",
+      Parameters: { Cidr: { Type: "String", Default: "0.0.0.0/0" } },
+      Resources: {
+        Sg: {
+          Type: "AWS::EC2::SecurityGroup",
+          Properties: {
+            GroupDescription: "web",
+            SecurityGroupIngress: [{ IpProtocol: "tcp", FromPort: 80, ToPort: 80, CidrIp: { Ref: "Cidr" } }],
+          },
+        },
+      },
+    }));
+    assert.equal(
+      open.findings.find((finding) => finding.ruleId === "NET001")?.title,
+      "Broad network exposure",
+    );
+
+    const unsubstituted = scanIac(`AWSTemplateFormatVersion: "2010-09-09"
+Parameters:
+  Cidr:
+    Type: String
+    Default: 0.0.0.0/0
+  Missing:
+    Type: String
+Resources:
+  Sg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: web
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp:
+            Fn::Sub: "\${Cidr}"
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp:
+            Ref: Missing
+`);
+    assert.equal(unsubstituted.findings.filter((finding) => finding.ruleId === "NET001").length, 0);
+
+    const secret = scanIac(`AWSTemplateFormatVersion: "2010-09-09"
+Parameters:
+  password:
+    Type: String
+    Default: hunter2
+Resources:
+  Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      Tags:
+        - Key: name
+          Value:
+            Ref: password
+`);
+    assert.equal(secret.findings.filter((finding) => finding.ruleId === "SEC001").length, 1);
+    assert.equal(
+      secret.findings.find((finding) => finding.ruleId === "SEC001")?.title,
+      "Hardcoded credential-like value",
+    );
+  });
+
+  it("flags an IAM source address that allows every address", () => {
+    const policy = scanIac(JSON.stringify({
+      Version: "2012-10-17",
+      Statement: [{
+        Effect: "Allow",
+        Action: "s3:GetObject",
+        Resource: "*",
+        Condition: { IpAddress: { "aws:SourceIp": "0.0.0.0/0" } },
+      }],
+    }));
+    assert.equal(policy.format, "iam");
+    assert.equal(policy.findings.filter((finding) => finding.ruleId === "NET001").length, 1);
+    assert.equal(policy.findings[0]?.title, "Broad network exposure");
+    assert.equal(policy.findings[0]?.severity, "high");
+    assert.equal(policy.findings.filter((finding) => finding.ruleId === "IAM001").length, 0);
+
+    for (const source of ["::/0", "*"]) {
+      const scan = scanIac(JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [{
+          Effect: "Allow",
+          Action: "s3:GetObject",
+          Resource: "*",
+          Condition: { IpAddress: { "aws:SourceIp": source } },
+        }],
+      }));
+      assert.equal(scan.findings.filter((finding) => finding.ruleId === "NET001").length, 1, source);
+    }
+
+    const clear = scanIac(JSON.stringify({
+      Version: "2012-10-17",
+      Statement: [
+        {
+          Effect: "Allow",
+          Action: "s3:GetObject",
+          Resource: "*",
+          Condition: { IpAddress: { "aws:SourceIp": "10.0.0.0/8" } },
+        },
+        {
+          Effect: "Allow",
+          Action: "s3:GetObject",
+          Resource: "*",
+          Condition: { IpAddress: { "aws:SourceIp": "203.0.113.4/32" } },
+        },
+        {
+          Effect: "Deny",
+          Action: "s3:GetObject",
+          Resource: "*",
+          Condition: { IpAddress: { "aws:SourceIp": "0.0.0.0/0" } },
+        },
+      ],
+    }));
+    assert.equal(clear.findings.length, 0);
+
+    const serverless = scanIac(`service: billing
+provider:
+  name: aws
+  iamRoleStatements:
+    - Effect: Allow
+      Action: s3:GetObject
+      Resource: '*'
+      Condition:
+        IpAddress:
+          aws:SourceIp: 0.0.0.0/0
+    - Effect: Allow
+      Action: s3:GetObject
+      Resource: '*'
+      Condition:
+        IpAddress:
+          aws:SourceIp: 10.0.0.0/8
+    - Effect: Deny
+      Action: '*'
+      Resource: '*'
+      Condition:
+        IpAddress:
+          aws:SourceIp: 0.0.0.0/0
+functions:
+  hello:
+    handler: handler.hello
+`);
+    assert.equal(serverless.format, "serverless");
+    assert.equal(serverless.findings.filter((finding) => finding.ruleId === "NET001").length, 1);
+    assert.equal(
+      serverless.findings.find((finding) => finding.ruleId === "NET001")?.title,
+      "Broad network exposure",
+    );
+    assert.equal(serverless.findings.filter((finding) => finding.ruleId === "IAM001").length, 0);
   });
 });
