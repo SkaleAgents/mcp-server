@@ -1,7 +1,16 @@
 # @skaleagents/swarm
 
-SkaleAgents MCP server with local stdio and hosted Streamable HTTP transports.
-Uses browser OAuth for sign-in.
+SkaleAgents MCP server. The hosted connection is `https://skaleagents.com/mcp`.
+
+## Quick start
+
+Copy `https://skaleagents.com/mcp` into your client and choose OAuth. Sign in
+with Google and click Allow. Leave client ID and secret fields blank when the
+client asks. Setup steps for Cursor, Claude Code, Claude Desktop, ChatGPT, and
+Codex are on the [MCP config page](https://skaleagents.com/mcp-config).
+
+The hosted URL is the way to connect. A local stdio process can still run this
+package; it opens the browser for OAuth when no token is set.
 
 Tools: `plan_architecture_review`, `review_application_architecture`,
 `review_architecture`, and `scan_iac`. The older `scan_iac_stub` name remains
@@ -56,7 +65,7 @@ for every review area, and the next questions. The MCP provides static evidence
 and the connected assistant's model reasons through the architecture. No
 separate hosted model is invoked, and the tools do not clone repositories or
 run submitted code. A clean static check is not a whole-system correctness
-verdict. The [settings page](https://skaleagents.com/settings) has an interactive
+verdict. The [MCP config page](https://skaleagents.com/mcp-config) has an interactive
 review-brief builder.
 
 ## Infrastructure scanning
@@ -106,8 +115,8 @@ in every result. An empty finding list is not proof that a system is secure.
 
 Use `https://skaleagents.com/mcp` in Claude Desktop or ChatGPT's custom connector
 settings. Choose OAuth and leave client ID and secret fields blank. The client
-registers itself, opens Google sign-in, and asks you to approve MCP access.
-See [client setup](https://skaleagents.com/settings) for Cursor, Claude Code,
+registers itself, opens Google sign-in, and asks you to click Allow.
+See [client setup](https://skaleagents.com/mcp-config) for Cursor, Claude Code,
 Claude Desktop, ChatGPT, and Codex instructions.
 
 The web app hosts this endpoint using `handleMcpRequest` from
@@ -127,8 +136,8 @@ forwarded to the public bot directory.
 
 The first tool call opens browser sign-in. Approve MCP access there and return
 to your AI client. The package stores the OAuth refresh credential locally and
-refreshes access automatically. You do not need to create or paste an API key.
-Active connections can be revoked from the web app's MCP settings page.
+refreshes access automatically. Active connections can be revoked from the
+[MCP config page](https://skaleagents.com/mcp-config).
 
 Local `review_architecture` calls validate the account and fetch public bot
 hints concurrently. The public directory request carries no credential. Every
