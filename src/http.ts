@@ -43,7 +43,7 @@ export function protectedResourceMetadata(): Response {
     authorization_servers: [getApiUrl()],
     scopes_supported: ["mcp"],
     bearer_methods_supported: ["header"],
-    resource_documentation: "https://skaleagents.com/settings",
+    resource_documentation: "https://skaleagents.com/mcp-config",
   });
 }
 

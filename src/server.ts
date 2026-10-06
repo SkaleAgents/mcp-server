@@ -5,6 +5,7 @@ import { architectureFindings, fetchPublicBotHints } from "./review.js";
 import { looksLikeIac, ScanInputError } from "./iac/parse.js";
 import { filterFindings, scanIac, summarize } from "./iac/scan.js";
 import { registerConsultation } from "./application/tools.js";
+import { presentReview } from "./review-edits.js";
 import { VERSION } from "./version.js";
 
 const contentSchema = z
@@ -123,21 +124,20 @@ export function createServer(remote = false) {
           format !== "application" &&
           (format !== "auto" || looksLikeIac(content))
         ) {
-          return result({
+          return result(presentReview(content, {
             ...scanIac(content, { ...options, format }),
             botHints: await botHints,
-          });
+          }));
         }
         const findings = filterFindings(
           architectureFindings(content, focus).slice(1),
           options,
         );
-        return result({
+        return result(presentReview(content, {
           status: "completed",
           engineVersion: VERSION,
           format: "application",
           focus,
-          summary: `Application review completed; ${findings.length} findings match the selected filters.`,
           findings: findings.slice(0, maxFindings),
           totalFindings: findings.length,
           totals: summarize(findings),
@@ -147,7 +147,7 @@ export function createServer(remote = false) {
             "Infrastructure bottleneck checks cover a disabled timeout, a one-connection pool, and an unbounded retry limit.",
           ],
           botHints: await botHints,
-        });
+        }));
       } catch (error) {
         return inputError(error);
       }
@@ -210,9 +210,10 @@ export function createServer(remote = false) {
         }
 
         try {
-          return result(
+          return result(presentReview(
+            content,
             scanIac(content, { format, focus, minSeverity, maxFindings }),
-          );
+          ));
         } catch (error) {
           return inputError(error);
         }
