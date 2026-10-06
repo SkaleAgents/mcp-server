@@ -5,12 +5,9 @@ SkaleAgents MCP server. The hosted connection is `https://skaleagents.com/mcp`.
 ## Quick start
 
 Copy `https://skaleagents.com/mcp` into your client and choose OAuth. Sign in
-with Google and click Allow. Leave client ID and secret fields blank when the
-client asks. Setup steps for Cursor, Claude Code, Claude Desktop, ChatGPT, and
-Codex are on the [MCP config page](https://skaleagents.com/mcp-config).
-
-The hosted URL is the way to connect. A local stdio process can still run this
-package; it opens the browser for OAuth when no token is set.
+with Google and click Allow. Leave client ID and secret blank when the client
+asks. Setup steps for Cursor, Claude Code, Claude Desktop, ChatGPT, and Codex
+are on the [MCP config page](https://skaleagents.com/mcp-config).
 
 Tools: `plan_architecture_review`, `review_application_architecture`,
 `review_architecture`, and `scan_iac`. The older `scan_iac_stub` name remains
@@ -111,15 +108,9 @@ locations point to resource declarations; property paths identify the setting.
 YAML aliases must be expanded before submission. Coverage limits are included
 in every result. An empty finding list is not proof that a system is secure.
 
-## Hosted connection
+## Hosted transport
 
-Use `https://skaleagents.com/mcp` in Claude Desktop or ChatGPT's custom connector
-settings. Choose OAuth and leave client ID and secret fields blank. The client
-registers itself, opens Google sign-in, and asks you to click Allow.
-See [client setup](https://skaleagents.com/mcp-config) for Cursor, Claude Code,
-Claude Desktop, ChatGPT, and Codex instructions.
-
-The web app hosts this endpoint using `handleMcpRequest` from
+The web app hosts `https://skaleagents.com/mcp` using `handleMcpRequest` from
 `@skaleagents/swarm/http`. Audit workers import `scanIac` from
 `@skaleagents/swarm/scan`. It validates each bearer credential with the API's
 `/api/oauth/mcp-token` endpoint before running a tool. Tokens are bound to the
@@ -129,94 +120,23 @@ forwarded to the public bot directory.
 `protectedResourceMetadata` exports the discovery response for
 `/.well-known/oauth-protected-resource/mcp`.
 
-## Local stdio prerequisites
-
-1. Node.js 20 or newer. The client connects to `https://api.skaleagents.com` by default.
-2. A browser that can open the SkaleAgents sign-in page.
-
-The first tool call opens browser sign-in. Approve MCP access there and return
-to your AI client. The package stores the OAuth refresh credential locally and
-refreshes access automatically. Active connections can be revoked from the
-[MCP config page](https://skaleagents.com/mcp-config).
-
-Local `review_architecture` calls validate the account and fetch public bot
-hints concurrently. The public directory request carries no credential. Every
-review still requires successful account validation. An anonymous directory
-request may already be in flight when validation rejects a connection.
-
 ## Local development
+
+People working on this repo need Node.js 20 or newer. This is not the way to connect a client.
 
 ```bash
 git clone https://github.com/SkaleAgents/mcp-server.git
 cd mcp-server
 npm install
-cp .env.example .env
 npm run build
 npm test
-npm run smoke   # needs API on :8082
 ```
-
-## Cursor
-
-Add to `.cursor/mcp.json` (project) or Cursor Settings → MCP:
-
-### Option A: local clone (recommended while API is local)
-
-```json
-{
-  "mcpServers": {
-    "skaleagents": {
-      "command": "node",
-      "args": ["/absolute/path/to/mcp-server/dist/index.js"],
-      "env": {
-        "PLATFORM_API_URL": "http://localhost:8082"
-      }
-    }
-  }
-}
-```
-
-Dev without build:
-
-```json
-{
-  "mcpServers": {
-    "skaleagents": {
-      "command": "npx",
-      "args": ["tsx", "/absolute/path/to/mcp-server/src/index.ts"],
-      "env": {
-        "PLATFORM_API_URL": "http://localhost:8082"
-      }
-    }
-  }
-}
-```
-
-### Option B: published package (hosted API)
-
-```json
-{
-  "mcpServers": {
-    "skaleagents": {
-      "command": "npx",
-       "args": ["-y", "@skaleagents/swarm@0.6.1"]
-    }
-  }
-}
-```
-
-Reconnect after upgrading to refresh the tool catalog. The consultation tools,
-snippet review, IaC scanner, and compatibility alias should all appear.
-
-## Claude Code
-
-Use the published package configuration above in `.mcp.json`. OAuth starts on the first tool call. No API URL or keys are needed.
 
 ## Environment
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `SKALEAGENTS_API_TOKEN` | No | Legacy Sanctum bearer-token override. OAuth is used when empty. |
+| `SKALEAGENTS_API_TOKEN` | No | Legacy override for CI only, not the way to connect. |
 | `PLATFORM_API_URL` | No | Defaults to `https://api.skaleagents.com`. Override only for local development or another API deployment. Empty values use the default. |
 | `SKALEAGENTS_OAUTH_CACHE` | No | OAuth cache path. Default `~/.config/skaleagents/oauth.json`. |
 | `SKALEAGENTS_OAUTH_ENABLED` | No | Set to `false` only to disable browser OAuth. |
@@ -224,7 +144,7 @@ Use the published package configuration above in `.mcp.json`. OAuth starts on th
 
 ## Steady-state tool latency probe
 
-With an existing, authorized `SKALEAGENTS_API_TOKEN` in the environment, run
+This probe uses the legacy `SKALEAGENTS_API_TOKEN` CI override. It is not how a client connects. With that variable already set, run
 `npm run benchmark:tool`. The script builds this checkout, starts its stdio MCP
 server, makes five warmup calls, then times 50 `review_architecture` calls on a
 fixed synthetic application snippet. Set `BENCHMARK_WARMUP` from 0 to 20 and
