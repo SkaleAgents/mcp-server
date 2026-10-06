@@ -6,6 +6,7 @@ import { looksLikeIac, ScanInputError } from "./iac/parse.js";
 import { filterFindings, scanIac, summarize } from "./iac/scan.js";
 import { registerConsultation } from "./application/tools.js";
 import { presentReview } from "./review-edits.js";
+import { savedTargetSchema, withSavedReview } from "./saved-review.js";
 import { VERSION } from "./version.js";
 
 const contentSchema = z
@@ -110,9 +111,10 @@ export function createServer(remote = false) {
           .describe(
             "Content format: terraform, cloudformation, kubernetes, pulumi, compose, dockerfile, github, helm, ansible, bicep, arm, gitlab, azure-pipelines, cloudbuild, tfvars, serverless, iam, package, application, auto.",
           ),
+        target: savedTargetSchema,
       },
     },
-    async ({ content, focus, format, minSeverity, maxFindings }) => {
+    async ({ content, focus, format, minSeverity, maxFindings, target }) => {
       const botHints = fetchPublicBotHints();
       if (!remote) {
         const auth = await requireApiAuth();
@@ -120,20 +122,25 @@ export function createServer(remote = false) {
       }
       try {
         const options = { focus, minSeverity, maxFindings };
+        const save = {
+          tool: "review_architecture",
+          target: target ?? null,
+          submittedPaths: [target?.path ?? ""],
+        };
         if (
           format !== "application" &&
           (format !== "auto" || looksLikeIac(content))
         ) {
-          return result(presentReview(content, {
+          return result(await withSavedReview(presentReview(content, {
             ...scanIac(content, { ...options, format }),
             botHints: await botHints,
-          }));
+          }), save));
         }
         const findings = filterFindings(
           architectureFindings(content, focus).slice(1),
           options,
         );
-        return result(presentReview(content, {
+        return result(await withSavedReview(presentReview(content, {
           status: "completed",
           engineVersion: VERSION,
           format: "application",
@@ -147,7 +154,7 @@ export function createServer(remote = false) {
             "Infrastructure bottleneck checks cover a disabled timeout, a one-connection pool, and an unbounded retry limit.",
           ],
           botHints: await botHints,
-        }));
+        }), save));
       } catch (error) {
         return inputError(error);
       }
@@ -201,19 +208,24 @@ export function createServer(remote = false) {
             ])
             .default("auto"),
           ...filters,
+          target: savedTargetSchema,
         },
       },
-      async ({ content, format, focus, minSeverity, maxFindings }) => {
+      async ({ content, format, focus, minSeverity, maxFindings, target }) => {
         if (!remote) {
           const auth = await requireApiAuth();
           if (!auth.ok) return unauthorizedContent(auth);
         }
 
         try {
-          return result(presentReview(
+          return result(await withSavedReview(presentReview(
             content,
             scanIac(content, { format, focus, minSeverity, maxFindings }),
-          ));
+          ), {
+            tool: name,
+            target: target ?? null,
+            submittedPaths: [target?.path ?? ""],
+          }));
         } catch (error) {
           return inputError(error);
         }

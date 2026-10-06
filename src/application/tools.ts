@@ -9,14 +9,20 @@ import {
   consultationInstructions,
 } from "./intake.js";
 import { reviewApplication } from "./review.js";
+import { applicationTargetSchema, withSavedReview } from "../saved-review.js";
 
-async function run(remote: boolean, compute: () => Record<string, unknown>) {
+async function run(
+  remote: boolean,
+  compute: () => Record<string, unknown>,
+  save?: Parameters<typeof withSavedReview>[1],
+) {
   if (!remote) {
     const auth = await requireApiAuth();
     if (!auth.ok) return unauthorizedContent(auth);
   }
   try {
-    const output = compute();
+    const computed = compute();
+    const output = save ? await withSavedReview(computed, save) : computed;
     return {
       content: [
         { type: "text" as const, text: JSON.stringify(output, null, 2) },
@@ -85,10 +91,15 @@ export function registerConsultation(server: McpServer, remote: boolean) {
             "Related source/config/test files with repository-relative paths; include package.json and tsconfig.json. At most 500,000 combined content characters",
           ),
         context: contextSchema,
+        target: applicationTargetSchema,
       },
     },
-    ({ files, context }) =>
-      run(remote, () => reviewApplication(files, context)),
+    ({ files, context, target }) =>
+      run(remote, () => reviewApplication(files, context), {
+        tool: "review_application_architecture",
+        target: target ?? null,
+        submittedPaths: files.map((file) => file.path),
+      }),
   );
   server.registerPrompt(
     "architecture_consultation",

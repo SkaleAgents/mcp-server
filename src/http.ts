@@ -1,6 +1,7 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { createServer } from "./server.js";
 import { getApiUrl } from "./config.js";
+import { requestAuthorization } from "./saved-review.js";
 
 const resource = process.env.MCP_RESOURCE_URL ?? "https://skaleagents.com/mcp";
 const metadataUrl = `${new URL(resource).origin}/.well-known/oauth-protected-resource/mcp`;
@@ -125,6 +126,7 @@ export async function handleMcpRequest(request: Request): Promise<Response> {
     });
   }
 
+  return requestAuthorization.run(authorization, async () => {
   const server = createServer(true);
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
@@ -149,4 +151,5 @@ export async function handleMcpRequest(request: Request): Promise<Response> {
   } finally {
     await server.close();
   }
+  });
 }
