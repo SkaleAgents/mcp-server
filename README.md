@@ -21,7 +21,7 @@ the MCP tool for a structured review.
 
 `npx -y @skaleagents/swarm scan [paths...]` scans IaC, CI, Dockerfile and package files on your machine. It needs no account and sends nothing over the network. Use `--changed` for files changed against HEAD, `--fail-on high` to exit 1, and `--json` for machine output.
 
-Adopt it on an existing repo: `npx @skaleagents/swarm scan --write-baseline .skaleagents-baseline.json`, commit the file, and later scans (hook and Action included) show only new findings. Findings match on rule, file and resource, not line number.
+Adopt it on an existing repo: `npx @skaleagents/swarm scan --write-baseline .skaleagents-baseline.json`, commit the file, and later scans show only new findings. The Action reads the baseline from the PR's base commit, so a PR cannot hide findings by editing it. Findings match on rule, file and resource, not line number.
 
 Suppress an intended setting with a comment on the flagged line or the line above: `# skaleagents-ignore DATA001 public asset bucket`.
 

@@ -44,7 +44,10 @@ runs:
         tool="$RUNNER_TEMP/skaleagents-tool"
         mkdir -p "$tool"
         (cd "$tool" && npm install --no-save --no-package-lock --ignore-scripts --registry=https://registry.npmjs.org "@skaleagents/swarm@$VERSION" >/dev/null) || exit 1
-        out=$(node "$tool/node_modules/@skaleagents/swarm/dist/index.js" scan --min-severity "$MIN_SEVERITY" --fail-on "$FAIL_ON" -- "${files[@]}")
+        # The baseline comes from the base commit, so a PR cannot hide its own findings by editing it.
+        baseline="$RUNNER_TEMP/skaleagents-baseline.json"
+        git show "$BASE:.skaleagents-baseline.json" > "$baseline" 2>/dev/null || echo '{"version":1,"findings":[]}' > "$baseline"
+        out=$(node "$tool/node_modules/@skaleagents/swarm/dist/index.js" scan --baseline "$baseline" --min-severity "$MIN_SEVERITY" --fail-on "$FAIL_ON" -- "${files[@]}")
         status=$?
         echo "$out" | tee -a "$GITHUB_STEP_SUMMARY"
         if [ "$status" -gt 1 ]; then exit "$status"; fi
