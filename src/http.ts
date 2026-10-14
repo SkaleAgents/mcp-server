@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { createServer } from "./server.js";
 import { getApiUrl } from "./config.js";
@@ -48,6 +49,18 @@ export function protectedResourceMetadata(): Response {
   });
 }
 
+// Revocation can take up to one TTL to take effect for an already-validated token.
+const validationTtlMs = 60_000;
+const validationCacheLimit = 10_000;
+const validatedUntil = new Map<string, number>();
+
+function rememberValidation(key: string, until: number) {
+  // Map keeps insertion order, so the first key is the oldest entry to evict.
+  if (!validatedUntil.has(key) && validatedUntil.size >= validationCacheLimit)
+    validatedUntil.delete(validatedUntil.keys().next().value!);
+  validatedUntil.set(key, until);
+}
+
 export async function handleMcpRequest(request: Request): Promise<Response> {
   const origin = request.headers.get("origin");
   if (origin && !allowedOrigins.has(origin))
@@ -58,35 +71,43 @@ export async function handleMcpRequest(request: Request): Promise<Response> {
   if (!authorization || !/^Bearer [^\s]+$/i.test(authorization))
     return challenge();
 
-  try {
-    // Validate the opaque token with its issuer, including the MCP audience.
-    const validation = await fetch(`${getApiUrl()}/api/oauth/mcp-token`, {
-      headers: { Authorization: authorization, Accept: "application/json" },
-      signal: AbortSignal.timeout(10_000),
-      redirect: "error",
-      cache: "no-store",
-    });
-    if (validation.status === 401 || validation.status === 403)
-      return challenge();
-    if (!validation.ok)
+  // Cache only successful validations, keyed by a digest so raw tokens are not kept.
+  const tokenKey = createHash("sha256").update(authorization.slice(7)).digest("hex");
+  if ((validatedUntil.get(tokenKey) ?? 0) <= Date.now()) {
+    try {
+      // Validate the opaque token with its issuer, including the MCP audience.
+      const validation = await fetch(`${getApiUrl()}/api/oauth/mcp-token`, {
+        headers: { Authorization: authorization, Accept: "application/json" },
+        signal: AbortSignal.timeout(10_000),
+        redirect: "error",
+        cache: "no-store",
+      });
+      if (validation.status === 401 || validation.status === 403)
+        return challenge();
+      if (!validation.ok)
+        return json(503, { error: "authorization_unavailable" });
+      const token = (await validation.json()) as {
+        active?: boolean;
+        resource?: string;
+        scope?: string;
+        expiresAt?: number;
+      };
+      if (
+        !token.active ||
+        token.resource !== resource ||
+        token.scope !== "mcp" ||
+        !token.expiresAt ||
+        token.expiresAt * 1000 <= Date.now()
+      ) {
+        return challenge();
+      }
+      rememberValidation(
+        tokenKey,
+        Math.min(Date.now() + validationTtlMs, token.expiresAt * 1000),
+      );
+    } catch {
       return json(503, { error: "authorization_unavailable" });
-    const token = (await validation.json()) as {
-      active?: boolean;
-      resource?: string;
-      scope?: string;
-      expiresAt?: number;
-    };
-    if (
-      !token.active ||
-      token.resource !== resource ||
-      token.scope !== "mcp" ||
-      !token.expiresAt ||
-      token.expiresAt * 1000 <= Date.now()
-    ) {
-      return challenge();
     }
-  } catch {
-    return json(503, { error: "authorization_unavailable" });
   }
 
   if (request.method !== "POST")

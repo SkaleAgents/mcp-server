@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { after, before, mock, test } from "node:test";
 import { handleMcpRequest, protectedResourceMetadata } from "./http.js";
 
 const realFetch = globalThis.fetch;
@@ -7,7 +7,9 @@ const url = "https://skaleagents.com";
 let active = true;
 let audience = `${url}/mcp`;
 let unavailable = false;
+let expiresAt: number | undefined;
 let calls: { url: string; authorization: string | null }[] = [];
+const tokenChecks = () => calls.filter((c) => c.url.endsWith("/api/oauth/mcp-token")).length;
 before(async () => {
   globalThis.fetch = async (input, init) => {
     const target = String(input);
@@ -23,7 +25,7 @@ before(async () => {
           active,
           resource: audience,
           scope: "mcp",
-          expiresAt: Date.now() / 1000 + 3600,
+          expiresAt: expiresAt ?? Date.now() / 1000 + 3600,
         },
         { status: unavailable ? 503 : active ? 200 : 401 },
       );
@@ -62,6 +64,7 @@ test("unauthenticated remote clients discover OAuth through the challenge", asyn
 });
 
 test("authenticated stateless clients initialize list and call shared review tools", async () => {
+  calls = [];
   const initialization = await call("initialize", {
     protocolVersion: "2025-03-26",
     capabilities: {},
@@ -83,7 +86,24 @@ test("authenticated stateless clients initialize list and call shared review too
       "scan_iac_stub",
     ],
   );
-  calls = [];
+  // Tools that save a review to the account write data, so they are not read-only.
+  assert.deepEqual(
+    Object.fromEntries(
+      tools.result.tools.map(
+        (tool: { name: string; annotations: { readOnlyHint: boolean } }) => [
+          tool.name,
+          tool.annotations.readOnlyHint,
+        ],
+      ),
+    ),
+    {
+      plan_architecture_review: true,
+      review_application_architecture: false,
+      review_architecture: false,
+      scan_iac: false,
+      scan_iac_stub: false,
+    },
+  );
   const review = await (
     await call("tools/call", {
       name: "review_architecture",
@@ -215,7 +235,7 @@ test("consultation validates batch limits and rejects unauthorized requests", as
         await call("tools/call", {
           name: "plan_architecture_review",
           arguments: { filePaths: [] },
-        })
+        }, "revoked-consult")
       ).status,
       401,
     );
@@ -242,16 +262,62 @@ test("tool errors reject malformed IaC, whitespace, invalid filters and excessiv
 
 test("revoked credentials and wrong-audience credentials cannot call tools", async () => {
   active = false;
-  assert.equal((await call("tools/list", {})).status, 401);
+  assert.equal((await call("tools/list", {}, "revoked-tools")).status, 401);
   active = true;
   audience = "https://another.example/mcp";
-  assert.equal((await call("tools/list", {})).status, 401);
+  assert.equal((await call("tools/list", {}, "wrong-audience")).status, 401);
   audience = `${url}/mcp`;
+});
+
+test("caches successful validations for 60 seconds and never beyond token expiry", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"] });
+  const before = tokenChecks();
+  const token = "cache-expiry";
+  assert.equal((await call("tools/list", {}, token)).status, 200);
+  assert.equal(tokenChecks(), before + 1);
+  t.mock.timers.tick(59_000);
+  assert.equal((await call("tools/list", {}, token)).status, 200);
+  assert.equal(tokenChecks(), before + 1, "cache hit within the TTL");
+  t.mock.timers.tick(2_000);
+  assert.equal((await call("tools/list", {}, token)).status, 200);
+  assert.equal(tokenChecks(), before + 2, "revalidates after the TTL");
+
+  const short = "cache-short-life";
+  expiresAt = Date.now() / 1000 + 10;
+  try {
+    assert.equal((await call("tools/list", {}, short)).status, 200);
+    t.mock.timers.tick(10_000);
+    assert.equal((await call("tools/list", {}, short)).status, 401);
+  } finally {
+    expiresAt = undefined;
+  }
+});
+
+test("does not cache rejected or unavailable validations", async () => {
+  const token = "not-cached-failure";
+  active = false;
+  try {
+    assert.equal((await call("tools/list", {}, token)).status, 401);
+    assert.equal((await call("tools/list", {}, token)).status, 401);
+  } finally {
+    active = true;
+  }
+  const before = tokenChecks();
+  assert.equal((await call("tools/list", {}, token)).status, 200);
+  assert.equal(tokenChecks(), before + 1, "the rejected token was validated again");
+  const outage = "not-cached-outage";
+  unavailable = true;
+  try {
+    assert.equal((await call("tools/list", {}, outage)).status, 503);
+  } finally {
+    unavailable = false;
+  }
+  assert.equal((await call("tools/list", {}, outage)).status, 200);
 });
 
 test("fails closed when authorization is unavailable and rejects malformed or oversized requests", async () => {
   unavailable = true;
-  assert.equal((await call("tools/list", {})).status, 503);
+  assert.equal((await call("tools/list", {}, "outage-check")).status, 503);
   unavailable = false;
   const headers = {
     Authorization: "Bearer remote-test",

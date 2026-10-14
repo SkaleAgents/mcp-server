@@ -236,7 +236,7 @@ export function architectureFindings(
   }
   if (
     shouldInclude(focusValue, "security") &&
-    /^\s*USER\s+root\s*$/im.test(content)
+    /^[^\S\n]*USER\s+root\s*$/im.test(content)
   ) {
     findings.push({
       severity: "medium",
@@ -274,7 +274,7 @@ export function architectureFindings(
         /(?:max_?open_?conns|maxOpenConns|SetMaxOpenConns)\s*(?:[:=]|\()\s*0\b/,
       "Memory limit is disabled":
         /(?:mem_limit|memory_limit)\s*[:=]\s*["']?0\b/i,
-      "Container runs as root": /^\s*USER\s+root\s*$/im,
+      "Container runs as root": /^[^\S\n]*USER\s+root\s*$/im,
     };
     const pattern = matchers[finding.title];
     const matches = pattern

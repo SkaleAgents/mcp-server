@@ -7,6 +7,10 @@
   },
   "type": "module",
   "description": "SkaleAgents review tools with OAuth for local and hosted MCP clients",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SkaleAgents/mcp-server.git"
+  },
   "exports": {
     "./http": {
       "types": "./dist/http.d.ts",

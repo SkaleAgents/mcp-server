@@ -80,7 +80,8 @@ export function registerConsultation(server: McpServer, remote: boolean) {
       title: "Review whole-application architecture",
       description:
         "Review related source files as an application. Builds a JS/TS import graph, checks Next.js server/client and runtime boundaries, maps routes and mutations, and returns evidence-backed findings plus questions covering data, auth, reliability, tests, deployment and product fit. Pass answers in context on subsequent calls. No repository fetch or execution; the connected assistant reasons about system-level tradeoffs using the returned evidence.",
-      annotations,
+      // Saves a review to the account when authorized, so it is not read-only.
+      annotations: { ...annotations, readOnlyHint: false },
       _meta: security,
       inputSchema: {
         files: z

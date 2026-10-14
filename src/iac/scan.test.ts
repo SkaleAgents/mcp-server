@@ -2481,3 +2481,31 @@ Resources:
     assert.equal(template.format, "cloudformation");
   });
 });
+
+describe("hostile input", () => {
+  // Each input is at the 500,000 character request limit and targets a regex that once rescanned per match.
+  const size = 500_000;
+  const pulumi = 'import * as pulumi from "@pulumi/aws";\n';
+  const cases: [string, string, string][] = [
+    ["blank lines in a Pulumi program", "pulumi", pulumi + "\n".repeat(size)],
+    ["unclosed block comments in a Pulumi program", "pulumi", pulumi + "/* ".repeat(size / 3)],
+    ["unclosed block comments in an HCL string", "terraform", `resource "a" "b" { x = "${"/* ".repeat(size / 3)}" }`],
+    ["unclosed Helm comments", "helm", "{{ /* ".repeat(size / 7)],
+    ["repeated download words in a package script", "package", `{"name":"x","scripts":{"a":"${"curl ".repeat(size / 5)}"}}`],
+    ["unclosed template parameters", "cloudformation", JSON.stringify({
+      Parameters: { P: { Type: "String", Default: "x" } },
+      Resources: { B: { Type: "AWS::S3::Bucket", Properties: { BucketName: { "Fn::Sub": "${".repeat(size / 3) } } } },
+    })],
+  ];
+  for (const [name, format, content] of cases) {
+    it(`finishes quickly on ${name}`, () => {
+      const started = performance.now();
+      try {
+        scanIac(content, { format: format as never });
+      } catch (error) {
+        assert.ok(error instanceof ScanInputError);
+      }
+      assert.ok(performance.now() - started < 2000, `took ${Math.round(performance.now() - started)} ms`);
+    });
+  }
+});
