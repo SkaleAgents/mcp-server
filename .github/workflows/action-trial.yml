@@ -10,6 +10,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: SkaleAgents/mcp-server@v0.8.1
+      - uses: SkaleAgents/mcp-server@action-fix
         with:
           fail-on: high
