@@ -34,6 +34,8 @@ runs:
         REPO: ${{ github.repository }}
         VERSION: ${{ inputs.version }}
       run: |
+        # The runner uses bash -e, which would abort on the scan's own exit 1 before the comment is posted.
+        set +e
         set -uo pipefail
         if [ -z "$BASE" ]; then echo "Run this action on pull_request events."; exit 1; fi
         list="$RUNNER_TEMP/skaleagents-files"
