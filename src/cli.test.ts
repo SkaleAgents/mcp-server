@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { scanFiles } from "./cli.js";
+import { baselineKey, readBaseline, scanFiles } from "./cli.js";
 import { scanIac } from "./iac/scan.js";
 
 const bucket = 'resource "aws_s3_bucket" "b" {\n  acl = "public-read"\n}\n';
@@ -46,5 +46,19 @@ describe("suppression parsing", () => {
     const result = scanIac(`# skaleagents-ignore DATA003 see DATA001\n${bucket}`);
     assert.equal(result.suppressedFindings, 1);
     assert.ok(result.findings.some((f) => f.ruleId === "DATA001"));
+  });
+});
+
+describe("baseline", () => {
+  it("keys ignore line numbers and reject foreign files", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sa-base-"));
+    writeFileSync(join(dir, "main.tf"), bucket);
+    const { findings } = scanFiles([join(dir, "main.tf")]);
+    const key = baselineKey(findings[0]);
+    assert.ok(!/\|\d+$/.test(key));
+    writeFileSync(join(dir, "b.json"), JSON.stringify({ version: 1, findings: [key] }));
+    assert.ok(readBaseline(join(dir, "b.json")).has(key));
+    writeFileSync(join(dir, "bad.json"), '{"findings":[1]}');
+    assert.throws(() => readBaseline(join(dir, "bad.json")), /not a SkaleAgents baseline/);
   });
 });

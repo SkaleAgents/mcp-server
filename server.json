@@ -1,0 +1,27 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.SkaleAgents/swarm",
+  "description": "Static IaC, CI and package security review for coding agents. Local scan CLI plus hosted OAuth MCP server.",
+  "repository": {
+    "url": "https://github.com/SkaleAgents/mcp-server",
+    "source": "github"
+  },
+  "version": "0.7.1",
+  "websiteUrl": "https://skaleagents.com",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@skaleagents/swarm",
+      "version": "0.7.1",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://skaleagents.com/mcp"
+    }
+  ]
+}

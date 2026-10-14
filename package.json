@@ -1,6 +1,6 @@
 {
   "name": "@skaleagents/swarm",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "private": false,
   "publishConfig": {
     "access": "public"
@@ -53,5 +53,6 @@
   "devDependencies": {
     "@types/node": "^22.20.1",
     "tsx": "^4.23.12"
-  }
+  },
+  "mcpName": "io.github.SkaleAgents/swarm"
 }

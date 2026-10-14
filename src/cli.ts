@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, readdirSync, readFileSync, type Stats } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, type Stats, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { scanIac, severityRank } from "./iac/scan.js";
 import type { Finding, FindingSeverity } from "./review.js";
@@ -11,6 +11,8 @@ Scans IaC, CI and package files locally. No account or network needed.
   --changed              Scan files changed against HEAD plus untracked files
   --min-severity <s>     Hide findings below info|low|medium|high|critical (default low)
   --fail-on <s>          Exit 1 when a finding is at or above this severity
+  --baseline <file>      Hide findings already listed in this baseline file (.skaleagents-baseline.json is used automatically)
+  --write-baseline <file>  Write current findings to a baseline file and exit 0
   --json                 Print JSON instead of text
   --hook                 Agent stop hook mode for Claude Code and Cursor (implies --changed)
 
@@ -94,6 +96,18 @@ export function scanFiles(files: string[], minSeverity: FindingSeverity = "low")
 // Names come from scanned files, so they are flattened and capped before reaching an agent or PR comment.
 const clean = (value: string | undefined, max = 160) => (value ?? "").replace(/[\x00-\x1f\x7f`]+/g, " ").slice(0, max);
 
+// Line numbers are left out so unrelated edits above a finding do not make it look new.
+export const baselineKey = (f: FileFinding) => `${f.ruleId}|${f.file.replaceAll("\\", "/")}|${f.resource ?? ""}`;
+
+export function readBaseline(path: string): Set<string> {
+  const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+  const keys = (parsed as { findings?: unknown })?.findings;
+  if (!Array.isArray(keys) || keys.some((key) => typeof key !== "string")) {
+    throw new Error(`${path} is not a SkaleAgents baseline file`);
+  }
+  return new Set(keys as string[]);
+}
+
 export function formatText(findings: FileFinding[], suppressed: number) {
   if (findings.length === 0) return `SkaleAgents: no findings${suppressed ? ` (${suppressed} suppressed)` : ""}.`;
   const lines = findings.map(
@@ -117,6 +131,8 @@ export async function runScan(argv: string[]): Promise<number> {
   let hook = false;
   let minSeverity: FindingSeverity = "low";
   let failOn: FindingSeverity | undefined;
+  let baselinePath: string | undefined;
+  let writeBaseline: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--") {
@@ -126,7 +142,12 @@ export async function runScan(argv: string[]): Promise<number> {
     else if (arg === "--json") json = true;
     else if (arg === "--hook") hook = changed = true;
     else if (arg === "--min-severity") minSeverity = severityArg(argv[++i], arg);
-    else if (arg === "--fail-on") failOn = severityArg(argv[++i], arg);
+    else if (arg === "--baseline" || arg === "--write-baseline") {
+      const value = argv[++i];
+      if (!value) throw new Error(`${arg} needs a file path`);
+      if (arg === "--baseline") baselinePath = value;
+      else writeBaseline = value;
+    } else if (arg === "--fail-on") failOn = severityArg(argv[++i], arg);
     else if (arg === "-h" || arg === "--help") {
       console.log(usage);
       return 0;
@@ -146,7 +167,18 @@ export async function runScan(argv: string[]): Promise<number> {
     for (const file of changedFiles()) walk(file, files);
   }
   for (const path of paths.length || changed ? paths : ["."]) walk(path, files);
-  const { findings, suppressed, warnings } = scanFiles([...new Set(files)], minSeverity);
+  const scanned = scanFiles([...new Set(files)], minSeverity);
+  const { suppressed, warnings } = scanned;
+  if (writeBaseline) {
+    const keys = [...new Set(scanned.findings.map(baselineKey))].sort();
+    writeFileSync(writeBaseline, `${JSON.stringify({ version: 1, findings: keys }, null, 2)}\n`);
+    console.log(`SkaleAgents: wrote ${keys.length} findings to ${writeBaseline}.`);
+    return 0;
+  }
+  // A committed baseline at the repo root applies automatically, so hooks and the Action need no flag.
+  baselinePath ??= existsSync(".skaleagents-baseline.json") ? ".skaleagents-baseline.json" : undefined;
+  const known = baselinePath ? readBaseline(baselinePath) : new Set<string>();
+  const findings = scanned.findings.filter((f) => !known.has(baselineKey(f)));
   const failing = failOn ? findings.filter((f) => severityRank[f.severity] >= severityRank[failOn]) : [];
 
   if (hook) {
