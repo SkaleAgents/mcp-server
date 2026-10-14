@@ -2,11 +2,12 @@ import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync, type Stats, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { scanIac, severityRank } from "./iac/scan.js";
+import { scanSecrets } from "./secrets.js";
 import type { Finding, FindingSeverity } from "./review.js";
 
 const usage = `Usage: skaleagents-swarm scan [paths...] [options]
 
-Scans IaC, CI and package files locally. No account or network needed.
+Scans IaC, CI and package files, and any file for committed secrets, locally. No account or network needed.
 
   --changed              Scan files changed against HEAD plus untracked files
   --min-severity <s>     Hide findings below info|low|medium|high|critical (default low)
@@ -36,7 +37,7 @@ function walk(path: string, out: string[]) {
     return;
   }
   if (stat.isFile()) {
-    if (candidate.test(path) && !skippedFiles.test(path)) out.push(path);
+    out.push(path);
     return;
   }
   if (!stat.isDirectory()) return;
@@ -167,8 +168,12 @@ export async function runScan(argv: string[]): Promise<number> {
     for (const file of changedFiles()) walk(file, files);
   }
   for (const path of paths.length || changed ? paths : ["."]) walk(path, files);
-  const scanned = scanFiles([...new Set(files)], minSeverity);
-  const { suppressed, warnings } = scanned;
+  const unique = [...new Set(files)];
+  const scanned = scanFiles(unique.filter((file) => candidate.test(file) && !skippedFiles.test(file)), minSeverity);
+  const secrets = scanSecrets(unique);
+  scanned.findings.push(...secrets.findings);
+  const suppressed = scanned.suppressed + secrets.suppressed;
+  const { warnings } = scanned;
   if (writeBaseline) {
     const keys = [...new Set(scanned.findings.map(baselineKey))].sort();
     writeFileSync(writeBaseline, `${JSON.stringify({ version: 1, findings: keys }, null, 2)}\n`);

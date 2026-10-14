@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.7.1 scan --hook",
+            "command": "npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.8.0 scan --hook",
             "timeout": 120
           }
         ]

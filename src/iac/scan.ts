@@ -21,7 +21,7 @@ const markerLine = /^----- skaleagents-file: (.+) -----$/;
 const ignoreMarker = /skaleagents-ignore[ \t]+([A-Za-z0-9_, \t-]+)/;
 
 // A `skaleagents-ignore RULE[,RULE]` comment on the finding's line or the line above suppresses it.
-function applySuppressions(findings: Finding[], text: string) {
+export function applySuppressions(findings: Finding[], text: string) {
   const lines = text.split("\n");
   const ignored = (line: number | undefined, ruleId: string | undefined) => {
     if (!line || !ruleId) return false;
