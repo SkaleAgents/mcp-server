@@ -1,0 +1,15 @@
+name: action-trial
+on: pull_request
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: SkaleAgents/mcp-server@v0.8.1
+        with:
+          fail-on: high
