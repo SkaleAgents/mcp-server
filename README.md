@@ -21,6 +21,8 @@ the MCP tool for a structured review.
 
 `npx -y @skaleagents/swarm scan [paths...]` scans IaC, CI, Dockerfile and package files on your machine. It needs no account and sends nothing over the network. Use `--changed` for files changed against HEAD, `--fail-on high` to exit 1, and `--json` for machine output.
 
+Adopt it on an existing repo: `npx @skaleagents/swarm scan --write-baseline .skaleagents-baseline.json`, commit the file, and later scans (hook and Action included) show only new findings. Findings match on rule, file and resource, not line number.
+
 Suppress an intended setting with a comment on the flagged line or the line above: `# skaleagents-ignore DATA001 public asset bucket`.
 
 **Claude Code plugin.** It adds a stop hook that scans changed files and asks the agent to fix `high` and `critical` findings, plus a skill and the hosted MCP server:
@@ -33,7 +35,7 @@ Suppress an intended setting with a comment on the flagged line or the line abov
 **Cursor.** Add `.cursor/hooks.json`:
 
 ```json
-{ "version": 1, "hooks": { "stop": [{ "command": "npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.7.0 scan --hook" }] } }
+{ "version": 1, "hooks": { "stop": [{ "command": "npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.7.1 scan --hook" }] } }
 ```
 
 **GitHub Action.** It posts one PR comment and fails on `critical` by default:
@@ -47,7 +49,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - uses: SkaleAgents/mcp-server@v0.7.0
+      - uses: SkaleAgents/mcp-server@v0.7.1
         with: { fail-on: high }
 ```
 
