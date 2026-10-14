@@ -27,7 +27,11 @@ function applySuppressions(findings: Finding[], text: string) {
     if (!line || !ruleId) return false;
     return [line - 1, line - 2].some((index) => {
       const match = ignoreMarker.exec(lines[index] ?? "");
-      return !!match && match[1].split(/[\s,]+/).includes(ruleId);
+      if (!match) return false;
+      // Rule IDs come first; the first other word starts the reason.
+      const tokens = match[1].split(/[\s,]+/).filter(Boolean);
+      const end = tokens.findIndex((token) => !/^[A-Z]+[0-9]+$/.test(token));
+      return tokens.slice(0, end === -1 ? undefined : end).includes(ruleId);
     });
   };
   const kept = findings.filter((f) => !ignored(f.location?.line, f.ruleId));

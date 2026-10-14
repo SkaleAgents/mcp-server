@@ -33,7 +33,7 @@ Suppress an intended setting with a comment on the flagged line or the line abov
 **Cursor.** Add `.cursor/hooks.json`:
 
 ```json
-{ "version": 1, "hooks": { "stop": [{ "command": "npx -y @skaleagents/swarm@^0.7.0 scan --hook" }] } }
+{ "version": 1, "hooks": { "stop": [{ "command": "npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.7.0 scan --hook" }] } }
 ```
 
 **GitHub Action.** It posts one PR comment and fails on `critical` by default:

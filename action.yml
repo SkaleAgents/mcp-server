@@ -36,15 +36,21 @@ runs:
       run: |
         set -uo pipefail
         if [ -z "$BASE" ]; then echo "Run this action on pull_request events."; exit 1; fi
-        mapfile -t files < <(git diff --name-only --diff-filter=ACMR "$BASE"...HEAD)
+        list="$RUNNER_TEMP/skaleagents-files"
+        git diff -z --name-only --diff-filter=ACMR "$BASE"...HEAD > "$list" || { echo "git diff against the base failed. Check out with fetch-depth: 0."; exit 1; }
+        mapfile -d '' -t files < "$list"
         if [ "${#files[@]}" -eq 0 ]; then echo "No changed files."; exit 0; fi
-        out=$(npx -y "@skaleagents/swarm@$VERSION" scan --min-severity "$MIN_SEVERITY" --fail-on "$FAIL_ON" -- "${files[@]}")
+        # Install outside the PR checkout so its .npmrc or package.json cannot redirect the package.
+        tool="$RUNNER_TEMP/skaleagents-tool"
+        mkdir -p "$tool"
+        (cd "$tool" && npm install --no-save --no-package-lock --ignore-scripts --registry=https://registry.npmjs.org "@skaleagents/swarm@$VERSION" >/dev/null) || exit 1
+        out=$(node "$tool/node_modules/@skaleagents/swarm/dist/index.js" scan --min-severity "$MIN_SEVERITY" --fail-on "$FAIL_ON" -- "${files[@]}")
         status=$?
         echo "$out" | tee -a "$GITHUB_STEP_SUMMARY"
         if [ "$status" -gt 1 ]; then exit "$status"; fi
         if [ "$COMMENT" = "true" ] && [ -n "$PR" ]; then
           body=$(printf '<!-- skaleagents-scan -->\n%s\n\nFails on `%s` or above. Suppress an intended setting with `# skaleagents-ignore RULE reason` on the line above.' "$out" "$FAIL_ON")
-          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq '.[] | select(.body | startswith("<!-- skaleagents-scan -->")) | .id' | head -1)
+          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq '.[] | select(.user.type == "Bot" and (.body | startswith("<!-- skaleagents-scan -->"))) | .id' | head -1)
           if [ -z "$id" ] && [[ "$out" == "SkaleAgents: no findings"* ]]; then exit 0; fi
           if [ -n "$id" ]; then gh api -X PATCH "repos/$REPO/issues/comments/$id" -f body="$body" >/dev/null
           else gh api "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null; fi

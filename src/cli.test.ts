@@ -40,3 +40,11 @@ describe("scanFiles", () => {
     assert.equal(finding?.location?.line, 1);
   });
 });
+
+describe("suppression parsing", () => {
+  it("does not treat rule-like words in the reason as rule IDs", () => {
+    const result = scanIac(`# skaleagents-ignore DATA003 see DATA001\n${bucket}`);
+    assert.equal(result.suppressedFindings, 1);
+    assert.ok(result.findings.some((f) => f.ruleId === "DATA001"));
+  });
+});
