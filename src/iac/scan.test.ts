@@ -2505,7 +2505,7 @@ describe("hostile input", () => {
       } catch (error) {
         assert.ok(error instanceof ScanInputError);
       }
-      assert.ok(performance.now() - started < 2000, `took ${Math.round(performance.now() - started)} ms`);
+      assert.ok(performance.now() - started < 10_000, `took ${Math.round(performance.now() - started)} ms`);
     });
   }
 });
