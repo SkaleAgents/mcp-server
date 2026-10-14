@@ -35,4 +35,19 @@ describe("scanSecrets", () => {
     assert.equal(result.findings.length, 0);
     assert.equal(result.suppressed, 1);
   });
+
+  it("tells private keys apart, skips placeholders, and stays fast on a 1 MB file", () => {
+    const header = ["-----BEGIN RSA ", "PRIVATE KEY-----"].join("");
+    const keys = write("k.pem", `${header}\nAAAA${"a".repeat(80)}\n${header}\nBBBB${"b".repeat(80)}\n`);
+    const result = scanSecrets([keys]);
+    assert.equal(result.findings.length, 2);
+    assert.notEqual(result.findings[0].resource, result.findings[1].resource);
+    const placeholderFile = write("p.txt", ["AKIA", "IOSFODNN7EXAMPLE"].join(""));
+    assert.equal(scanSecrets([placeholderFile]).findings.length, 0);
+    const big = write("big.txt", `${awsKey}\n`.repeat(Math.floor(1_000_000 / (awsKey.length + 1))));
+    const started = Date.now();
+    const bigResult = scanSecrets([big]);
+    assert.ok(Date.now() - started < 3000);
+    assert.equal(bigResult.findings.length, 1);
+  });
 });

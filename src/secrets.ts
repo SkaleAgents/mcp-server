@@ -17,6 +17,8 @@ const patterns: [name: string, pattern: RegExp][] = [
   ["Private key", /-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY(?: BLOCK)?-----/g],
 ];
 const maxBytes = 1_000_000;
+const maxFindings = 1000;
+const placeholder = /EXAMPLE|YOUR|PLACEHOLDER|XXXX/i;
 const skipped = /(^|[/\\])(package-lock\.json|composer\.lock|pnpm-lock\.yaml|yarn\.lock|\.skaleagents-baseline\.json)$|\.(png|jpe?g|gif|webp|ico|pdf|zip|gz|woff2?|ttf|mp4|mov|wasm|lock|map)$/i;
 
 function gitIgnored(files: string[]): Set<string> {
@@ -50,10 +52,24 @@ export function scanSecrets(files: string[]) {
     }
     if (text.includes("\0")) continue;
     const found: Finding[] = [];
+    const seen = new Set<string>();
+    const lineStarts = [0];
+    for (let i = text.indexOf("\n"); i !== -1; i = text.indexOf("\n", i + 1)) lineStarts.push(i + 1);
     for (const [name, pattern] of patterns) {
       for (const match of text.matchAll(pattern)) {
-        const line = text.slice(0, match.index).split("\n").length;
-        const digest = createHash("sha256").update(match[0]).digest("hex").slice(0, 6);
+        if (placeholder.test(match[0])) continue;
+        let low = 0;
+        let high = lineStarts.length - 1;
+        while (low < high) {
+          const mid = (low + high + 1) >> 1;
+          if (lineStarts[mid] <= match.index) low = mid;
+          else high = mid - 1;
+        }
+        const line = low + 1;
+        // A key block's header is the same for every key, so its digest also covers the start of the body.
+        const material = name === "Private key" ? text.slice(match.index, match.index + match[0].length + 64) : match[0];
+        const digest = createHash("sha256").update(material).digest("hex").slice(0, 6);
+        const resource = `${name} ${digest}`;
         found.push({
           severity: "critical",
           category: "security",
@@ -61,14 +77,20 @@ export function scanSecrets(files: string[]) {
           title: `${name} in source`,
           detail: `A ${name.toLowerCase()} is committed in plain text. The value is not shown here.`,
           remediation: "Revoke and rotate it now, remove it from the file and from git history, and load it from a secret manager or environment variable.",
-          resource: `${name} ${digest}`,
+          resource,
           location: { line, column: 1, path: name },
         });
       }
     }
     const applied = applySuppressions(found, text);
     suppressed += applied.suppressed;
-    for (const finding of applied.kept) findings.push({ ...finding, file: relative(".", file) });
+    for (const finding of applied.kept) {
+      // One finding per distinct secret per file, matching the baseline key, after suppressions so an ignored copy cannot hide another.
+      if (seen.has(finding.resource ?? "")) continue;
+      seen.add(finding.resource ?? "");
+      if (findings.length >= maxFindings) return { findings, suppressed, truncated: true };
+      findings.push({ ...finding, file: relative(".", file) });
+    }
   }
-  return { findings, suppressed };
+  return { findings, suppressed, truncated: false };
 }
