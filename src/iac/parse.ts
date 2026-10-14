@@ -81,10 +81,10 @@ export function looksLikeIac(content: string): boolean {
     }
   }
   return (
-    /^\s*(?:resource|module|terraform|variable|provider)\s+["{]/m.test(
+    /^[^\S\n]*(?:resource|module|terraform|variable|provider)\s+["{]/m.test(
       content,
     ) ||
-    /^\s*(?:["']?Resources["']?\s*:|apiVersion\s*:)/m.test(content) ||
+    /^[^\S\n]*(?:["']?Resources["']?\s*:|apiVersion\s*:)/m.test(content) ||
     /^\s*\{\s*"(?:resource|Resources|apiVersion|AWSTemplateFormatVersion)"\s*:/.test(
       content,
     ) ||
@@ -105,17 +105,17 @@ export function looksLikeIac(content: string): boolean {
 }
 
 export function looksLikePulumiProgram(content: string): boolean {
-  return /(?:^|\n)\s*(?:import\s+\*\s+as\s+pulumi\b|import\s+pulumi\b|from\s+["']@pulumi\/)/.test(
+  return /(?:^|\n)[^\S\n]*(?:import\s+\*\s+as\s+pulumi\b|import\s+pulumi\b|from\s+["']@pulumi\/)/.test(
     content,
   );
 }
 
 export function looksLikeCompose(content: string): boolean {
-  return /^\s*services\s*:/m.test(content) && /^\s+image\s*:/m.test(content);
+  return /^[^\S\n]*services\s*:/m.test(content) && /^[^\S\n]+image\s*:/m.test(content);
 }
 
 export function looksLikeDockerfile(content: string): boolean {
-  return /^\s*FROM\s+\S+/m.test(content);
+  return /^[^\S\n]*FROM\s+\S+/m.test(content);
 }
 
 function topLevelKey(content: string, name: string): boolean {
@@ -124,7 +124,7 @@ function topLevelKey(content: string, name: string): boolean {
 
 function playbookShape(content: string): boolean {
   if (topLevelKey(content, "hosts") && topLevelKey(content, "tasks")) return true;
-  return /^\s*-\s+hosts\s*:/m.test(content) && /^\s*tasks\s*:/m.test(content);
+  return /^[^\S\n]*-\s+hosts\s*:/m.test(content) && /^[^\S\n]*tasks\s*:/m.test(content);
 }
 
 export function looksLikeAnsible(content: string): boolean {
@@ -138,7 +138,7 @@ export function looksLikeHelm(content: string): boolean {
   if (looksLikeGithubWorkflow(content) || looksLikeAnsible(content)) return false;
   const visible = maskNonCode(content);
   if (!visible.includes("{{")) return false;
-  return /^\s*(?:apiVersion|kind)\s*:/m.test(visible);
+  return /^[^\S\n]*(?:apiVersion|kind)\s*:/m.test(visible);
 }
 
 export function looksLikeGithubWorkflow(content: string): boolean {
@@ -147,14 +147,14 @@ export function looksLikeGithubWorkflow(content: string): boolean {
   const topOn = topLevelKey(content, "on");
   const composeOnly =
     topLevelKey(content, "services") &&
-    /^\s+image\s*:/m.test(content) &&
+    /^[^\S\n]+image\s*:/m.test(content) &&
     !topOn;
   if (composeOnly) return false;
   return topOn && topLevelKey(content, "jobs");
 }
 
 export function looksLikeTerraformHcl(content: string): boolean {
-  return /^\s*(?:(?:resource|module|variable|provider|data|output)\s+"|(?:terraform|locals)\s*\{)/m.test(
+  return /^[^\S\n]*(?:(?:resource|module|variable|provider|data|output)\s+"|(?:terraform|locals)\s*\{)/m.test(
     content,
   );
 }
@@ -162,7 +162,7 @@ export function looksLikeTerraformHcl(content: string): boolean {
 export function looksLikeBicep(content: string): boolean {
   const visible = maskIaCComments(content);
   if (looksLikeTerraformHcl(visible)) return false;
-  return /^\s*resource\s+[A-Za-z_][A-Za-z0-9_]*\s+['"]Microsoft\./m.test(visible);
+  return /^[^\S\n]*resource\s+[A-Za-z_][A-Za-z0-9_]*\s+['"]Microsoft\./m.test(visible);
 }
 
 export function looksLikeArm(content: string): boolean {
@@ -203,8 +203,8 @@ export function looksLikeArm(content: string): boolean {
 
 export function looksLikePulumiYaml(content: string): boolean {
   return (
-    /^\s*resources\s*:/m.test(content) &&
-    /^\s+type\s*:\s*[A-Za-z0-9_.-]+:\S+/m.test(content)
+    /^[^\S\n]*resources\s*:/m.test(content) &&
+    /^[^\S\n]+type\s*:\s*[A-Za-z0-9_.-]+:\S+/m.test(content)
   );
 }
 
@@ -319,10 +319,7 @@ export function parseIac(
     checkShape(data);
     // The HCL parser preserves expressions but does not expose source ranges.
     // Report the resource declaration line and the exact parsed property path.
-    const searchable = content.replace(
-      /\/\*[\s\S]*?\*\/|(?:#|\/\/)[^\n]*/g,
-      (match) => match.replace(/[^\n]/g, " "),
-    );
+    const searchable = blankComments(content, /(?:#|\/\/)[^\n]*/.source);
     for (const [type, instances] of Object.entries(
       object(object(data).resource),
     )) {
@@ -664,11 +661,36 @@ function programLocation(content: string, offset: number, path: string) {
   };
 }
 
+// One left-to-right pass that blanks block comments and, when given, line comments
+// (newlines kept). A lazy /\*[\s\S]*?\*\// rescans to the end for every unclosed opener,
+// which is quadratic on hostile input. An unclosed "/*" stays code, as before.
+function blankComments(text: string, lineSource?: string): string {
+  const pattern = new RegExp(lineSource ? `\\/\\*|${lineSource}` : "\\/\\*", "g");
+  let out = "";
+  let last = 0;
+  let closable = true;
+  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+    let end = pattern.lastIndex;
+    if (match[0] === "/*") {
+      // No "*/" after one opener means none after any later opener either.
+      const close = closable ? text.indexOf("*/", end) : -1;
+      if (close < 0) {
+        closable = false;
+        continue;
+      }
+      end = close + 2;
+      pattern.lastIndex = end;
+    }
+    out += text.slice(last, match.index) + text.slice(match.index, end).replace(/[^\n]/g, " ");
+    last = end;
+  }
+  return out + text.slice(last);
+}
+
 function stripProgramComments(content: string): string {
-  return content
-    .replace(/\/\*[\s\S]*?\*\//g, (match) => match.replace(/[^\n]/g, " "))
+  return blankComments(content)
     .replace(/(^|[^:])\/\/[^\n]*/g, (match) => match.replace(/[^\n]/g, " "))
-    .replace(/(^|\n)\s*#[^\n]*/g, (match) => match.replace(/[^\n]/g, " "));
+    .replace(/(^|\n)[^\S\n]*#[^\n]*/g, (match) => match.replace(/[^\n]/g, " "));
 }
 
 function parsePulumiProgram(content: string): ParsedIac {
@@ -957,13 +979,13 @@ function azurePipelineShape(content: string): boolean {
 function gitlabShape(content: string): boolean {
   if (!/\bimage\s*:/.test(content)) return false;
   if (topLevelKey(content, "stages")) return true;
-  return /^\s*script\s*:/m.test(content);
+  return /^[^\S\n]*script\s*:/m.test(content);
 }
 
 function cloudBuildShape(content: string): boolean {
   if (!topLevelKey(content, "steps")) return false;
   if (topLevelKey(content, "on") && topLevelKey(content, "jobs")) return false;
-  return /^\s*-\s*name\s*:/m.test(content);
+  return /^[^\S\n]*-\s*name\s*:/m.test(content);
 }
 
 function looksLikePipeline(content: string): PipelineFormat | undefined {
@@ -1150,9 +1172,9 @@ function parsePipeline(content: string, format: PipelineFormat): ParsedIac {
 
 function looksLikeTfvars(content: string): boolean {
   const visible = maskIaCComments(content);
-  if (/^\s*(?:resource|module|provider)\s+["']/m.test(visible)) return false;
-  if (/^\s*(?:terraform|provider|module)\s*\{/m.test(visible)) return false;
-  return /^\s*[A-Za-z_][A-Za-z0-9_]*\s*=\s*\S/m.test(visible);
+  if (/^[^\S\n]*(?:resource|module|provider)\s+["']/m.test(visible)) return false;
+  if (/^[^\S\n]*(?:terraform|provider|module)\s*\{/m.test(visible)) return false;
+  return /^[^\S\n]*[A-Za-z_][A-Za-z0-9_]*\s*=\s*\S/m.test(visible);
 }
 
 function parseTfvars(content: string): ParsedIac {
@@ -1488,10 +1510,10 @@ function escapeRegex(value: string): string {
 
 function maskNonCode(content: string): string {
   const withoutBlockComments = content
-    .replace(/\{\{-?\s*\/\*[\s\S]*?\*\/\s*-?\}\}/g, (match) =>
+    .replace(/\{\{-?\s*\/\*[\s\S]{0,4096}?\*\/\s*-?\}\}/g, (match) =>
       match.replace(/[^\n]/g, " "),
     )
-    .replace(/\{#[\s\S]*?#\}/g, (match) => match.replace(/[^\n]/g, " "));
+    .replace(/\{#[\s\S]{0,4096}?#\}/g, (match) => match.replace(/[^\n]/g, " "));
   return withoutBlockComments
     .split("\n")
     .map((line) => {
@@ -1586,7 +1608,7 @@ function parseAnsible(content: string): ParsedIac {
   const visible = maskNonCode(content);
   const become = firstLiteral(
     visible,
-    /(?:^|\n)\s*(?:-\s+)?become\s*:\s*["']?(?:true|yes)["']?(?=\s|$)/,
+    /(?:^|\n)[^\S\n]*(?:-\s+)?become\s*:\s*["']?(?:true|yes)["']?(?=\s|$)/,
   );
   const cidr = firstLiteral(
     visible,
@@ -1841,7 +1863,7 @@ function substituteKnownParameters(
   let unresolved = false;
   let secret = false;
   const names: string[] = [];
-  const text = template.replace(/\$\{(!?)([^}]*)\}/g, (full, literalMark: string, rawName: string) => {
+  const text = template.replace(/\$\{(!?)([^}]{0,200})\}/g, (full, literalMark: string, rawName: string) => {
     if (literalMark === "!") return `\${${rawName}}`;
     const name = rawName.trim();
     if (!parameters.defaults.has(name)) {
@@ -2068,7 +2090,9 @@ export function looksLikePackage(content: string): boolean {
 }
 
 function scriptPipesDownload(command: string): boolean {
-  return /\b(?:curl|wget)\b[\s\S]*\|\s*(?:ba)?sh\b/.test(command);
+  // Search only after the first download word. A [\s\S]* prefix rescans per download word.
+  const start = command.search(/\b(?:curl|wget)\b/);
+  return start >= 0 && /\|\s*(?:ba)?sh\b/.test(command.slice(start));
 }
 
 function jsonKeyLine(content: string, key: string): number {
