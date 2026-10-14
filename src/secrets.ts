@@ -18,7 +18,8 @@ const patterns: [name: string, pattern: RegExp][] = [
 ];
 const maxBytes = 1_000_000;
 const maxFindings = 1000;
-const placeholder = /EXAMPLE|YOUR|PLACEHOLDER|XXXX/i;
+// Case-sensitive and anchored to the documented dummy shapes, so a real key cannot be skipped by chance or by padding.
+const placeholder = /EXAMPLE$|^[^a-z]*?(?:X{12,}|x{12,})/;
 const skipped = /(^|[/\\])(package-lock\.json|composer\.lock|pnpm-lock\.yaml|yarn\.lock|\.skaleagents-baseline\.json)$|\.(png|jpe?g|gif|webp|ico|pdf|zip|gz|woff2?|ttf|mp4|mov|wasm|lock|map)$/i;
 
 function gitIgnored(files: string[]): Set<string> {
