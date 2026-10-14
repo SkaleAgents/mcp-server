@@ -6,13 +6,13 @@
     "url": "https://github.com/SkaleAgents/mcp-server",
     "source": "github"
   },
-  "version": "0.8.1",
+  "version": "0.8.2",
   "websiteUrl": "https://skaleagents.com",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@skaleagents/swarm",
-      "version": "0.8.1",
+      "version": "0.8.2",
       "transport": {
         "type": "stdio"
       }
