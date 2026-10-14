@@ -18,6 +18,25 @@ export type ScanOptions = {
 };
 
 const markerLine = /^----- skaleagents-file: (.+) -----$/;
+const ignoreMarker = /skaleagents-ignore[ \t]+([A-Za-z0-9_, \t-]+)/;
+
+// A `skaleagents-ignore RULE[,RULE]` comment on the finding's line or the line above suppresses it.
+function applySuppressions(findings: Finding[], text: string) {
+  const lines = text.split("\n");
+  const ignored = (line: number | undefined, ruleId: string | undefined) => {
+    if (!line || !ruleId) return false;
+    return [line - 1, line - 2].some((index) => {
+      const match = ignoreMarker.exec(lines[index] ?? "");
+      if (!match) return false;
+      // Rule IDs come first; the first other word starts the reason.
+      const tokens = match[1].split(/[\s,]+/).filter(Boolean);
+      const end = tokens.findIndex((token) => !/^[A-Z]+[0-9]+$/.test(token));
+      return tokens.slice(0, end === -1 ? undefined : end).includes(ruleId);
+    });
+  };
+  const kept = findings.filter((f) => !ignored(f.location?.line, f.ruleId));
+  return { kept, suppressed: findings.length - kept.length };
+}
 
 export function summarize(findings: Finding[]) {
   const bySeverity = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
@@ -104,6 +123,7 @@ function presentScan(
   findings: Finding[],
   checked: Set<string>,
   options: ScanOptions,
+  suppressed: number,
 ) {
   const visible = filterFindings(findings, options);
   const limit = options.maxFindings ?? 100;
@@ -124,6 +144,7 @@ function presentScan(
     totals: summarize(visible),
     totalFindings: visible.length,
     truncated: visible.length > limit,
+    suppressedFindings: suppressed,
     rulesEvaluated: [...checked].sort(),
     warnings: [...new Set(parsed.warnings)],
     limitations: [
@@ -142,17 +163,18 @@ function presentScan(
 function scanDocument(content: string, options: ScanOptions) {
   const parsed = parseIac(content, options.format);
   const result = resourceFindings(parsed.resources, parsed.format);
-  return presentScan(parsed, result.findings, result.checked, options);
+  const { kept, suppressed } = applySuppressions(result.findings, content);
+  return presentScan(parsed, kept, result.checked, options, suppressed);
 }
 
 function scanMarked(parts: { name: string; text: string }[], options: ScanOptions) {
   const tables = mergeTables(parts.map((part) => readCloudFormationTables(part.text)));
-  const parsedParts: { name: string; parsed: ParsedIac }[] = [];
+  const parsedParts: { name: string; text: string; parsed: ParsedIac }[] = [];
   let lastError: unknown;
   for (const part of parts) {
     if (!part.text.trim()) continue;
     try {
-      parsedParts.push({ name: part.name, parsed: parseIac(part.text, "auto", tables) });
+      parsedParts.push({ name: part.name, text: part.text, parsed: parseIac(part.text, "auto", tables) });
     } catch (error) {
       lastError = error;
     }
@@ -169,17 +191,20 @@ function scanMarked(parts: { name: string; text: string }[], options: ScanOption
   const checked = new Set<string>();
   const warnings: string[] = [];
   const formats = new Set<IacFormat>();
+  let suppressed = 0;
   for (const part of parsedParts) {
     const labeled = part.parsed.resources.map((resource) => labelResource(resource, part.name));
     const result = resourceFindings(labeled, part.parsed.format, literals);
+    const applied = applySuppressions(result.findings, part.text);
+    suppressed += applied.suppressed;
     resources.push(...labeled);
-    findings.push(...result.findings);
+    findings.push(...applied.kept);
     for (const id of result.checked) checked.add(id);
     warnings.push(...part.parsed.warnings);
     formats.add(part.parsed.format);
   }
   const format = formats.size === 1 ? [...formats][0] : parsedParts[0].parsed.format;
-  const presented = presentScan({ format, resources, warnings }, findings, checked, options);
+  const presented = presentScan({ format, resources, warnings }, findings, checked, options, suppressed);
   if (formats.has("terraform") || formats.has("cloudformation")) {
     if (!presented.limitations.includes(sharedResolutionLimit))
       presented.limitations.push(sharedResolutionLimit);

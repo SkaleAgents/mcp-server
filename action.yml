@@ -1,0 +1,58 @@
+name: SkaleAgents IaC scan
+description: Scan IaC, CI and package files changed in a pull request and post one summary comment.
+branding:
+  icon: shield
+  color: blue
+inputs:
+  fail-on:
+    description: Fail the check when a finding is at or above this severity (info, low, medium, high, critical).
+    default: critical
+  min-severity:
+    description: Hide findings below this severity.
+    default: low
+  comment:
+    description: Post or update one PR comment with the results.
+    default: "true"
+  github-token:
+    description: Token used to post the PR comment. Needs pull-requests write.
+    default: ${{ github.token }}
+  version:
+    description: "@skaleagents/swarm version to run."
+    default: "0.7.0"
+runs:
+  using: composite
+  steps:
+    - name: Scan changed files
+      shell: bash
+      env:
+        BASE: ${{ github.event.pull_request.base.sha }}
+        FAIL_ON: ${{ inputs.fail-on }}
+        MIN_SEVERITY: ${{ inputs.min-severity }}
+        COMMENT: ${{ inputs.comment }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        set -uo pipefail
+        if [ -z "$BASE" ]; then echo "Run this action on pull_request events."; exit 1; fi
+        list="$RUNNER_TEMP/skaleagents-files"
+        git diff -z --name-only --diff-filter=ACMR "$BASE"...HEAD > "$list" || { echo "git diff against the base failed. Check out with fetch-depth: 0."; exit 1; }
+        mapfile -d '' -t files < "$list"
+        if [ "${#files[@]}" -eq 0 ]; then echo "No changed files."; exit 0; fi
+        # Install outside the PR checkout so its .npmrc or package.json cannot redirect the package.
+        tool="$RUNNER_TEMP/skaleagents-tool"
+        mkdir -p "$tool"
+        (cd "$tool" && npm install --no-save --no-package-lock --ignore-scripts --registry=https://registry.npmjs.org "@skaleagents/swarm@$VERSION" >/dev/null) || exit 1
+        out=$(node "$tool/node_modules/@skaleagents/swarm/dist/index.js" scan --min-severity "$MIN_SEVERITY" --fail-on "$FAIL_ON" -- "${files[@]}")
+        status=$?
+        echo "$out" | tee -a "$GITHUB_STEP_SUMMARY"
+        if [ "$status" -gt 1 ]; then exit "$status"; fi
+        if [ "$COMMENT" = "true" ] && [ -n "$PR" ]; then
+          body=$(printf '<!-- skaleagents-scan -->\n%s\n\nFails on `%s` or above. Suppress an intended setting with `# skaleagents-ignore RULE reason` on the line above.' "$out" "$FAIL_ON")
+          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq '.[] | select(.user.type == "Bot" and (.body | startswith("<!-- skaleagents-scan -->"))) | .id' | head -1)
+          if [ -z "$id" ] && [[ "$out" == "SkaleAgents: no findings"* ]]; then exit 0; fi
+          if [ -n "$id" ]; then gh api -X PATCH "repos/$REPO/issues/comments/$id" -f body="$body" >/dev/null
+          else gh api "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null; fi
+        fi
+        exit "$status"

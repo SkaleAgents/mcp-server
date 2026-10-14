@@ -1,6 +1,6 @@
 {
   "name": "@skaleagents/swarm",
-  "version": "0.6.20",
+  "version": "0.7.0",
   "private": false,
   "publishConfig": {
     "access": "public"
