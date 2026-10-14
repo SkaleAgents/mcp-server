@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "skaleagents": {
+      "type": "http",
+      "url": "https://skaleagents.com/mcp"
+    }
+  }
+}

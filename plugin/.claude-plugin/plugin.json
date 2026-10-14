@@ -1,0 +1,9 @@
+{
+  "name": "skaleagents",
+  "version": "0.7.0",
+  "description": "Scans the IaC, CI and package files your agent changed before it stops, and connects the SkaleAgents MCP server.",
+  "author": { "name": "SkaleAgents", "url": "https://skaleagents.com" },
+  "homepage": "https://skaleagents.com",
+  "repository": "https://github.com/SkaleAgents/mcp-server",
+  "license": "UNLICENSED"
+}

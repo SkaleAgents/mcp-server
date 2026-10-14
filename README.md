@@ -17,6 +17,40 @@ an alias for the IaC scanner.
 client reads the files in its workspace and sends the relevant content through
 the MCP tool for a structured review.
 
+## Scan locally, in agent hooks, and in pull requests
+
+`npx -y @skaleagents/swarm scan [paths...]` scans IaC, CI, Dockerfile and package files on your machine. It needs no account and sends nothing over the network. Use `--changed` for files changed against HEAD, `--fail-on high` to exit 1, and `--json` for machine output.
+
+Suppress an intended setting with a comment on the flagged line or the line above: `# skaleagents-ignore DATA001 public asset bucket`.
+
+**Claude Code plugin.** It adds a stop hook that scans changed files and asks the agent to fix `high` and `critical` findings, plus a skill and the hosted MCP server:
+
+```
+/plugin marketplace add SkaleAgents/mcp-server
+/plugin install skaleagents@skaleagents
+```
+
+**Cursor.** Add `.cursor/hooks.json`:
+
+```json
+{ "version": 1, "hooks": { "stop": [{ "command": "npx -y @skaleagents/swarm@^0.7.0 scan --hook" }] } }
+```
+
+**GitHub Action.** It posts one PR comment and fails on `critical` by default:
+
+```yaml
+on: pull_request
+permissions: { contents: read, pull-requests: write }
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: SkaleAgents/mcp-server@v0.7.0
+        with: { fail-on: high }
+```
+
 ## Whole-application consultation
 
 Ask your connected assistant:
