@@ -23,6 +23,8 @@ the MCP tool for a structured review.
 
 Adopt it on an existing repo: `npx @skaleagents/swarm scan --write-baseline .skaleagents-baseline.json`, commit the file, and later scans show only new findings. The Action reads the baseline from the PR's base commit, so a PR cannot hide findings by editing it. Findings match on rule, file and resource, not line number.
 
+`scan` also looks for committed secrets in any file it reads (AWS, GitHub, Slack, Stripe, Google, npm and Anthropic keys, private keys) as `SECRET001`, critical. The value is never printed. Git-ignored files such as a local `.env` are skipped. Rotate the key; only suppress a documented example.
+
 Suppress an intended setting with a comment on the flagged line or the line above: `# skaleagents-ignore DATA001 public asset bucket`.
 
 **Claude Code plugin.** It adds a stop hook that scans changed files and asks the agent to fix `high` and `critical` findings, plus a skill and the hosted MCP server:
@@ -35,7 +37,7 @@ Suppress an intended setting with a comment on the flagged line or the line abov
 **Cursor.** Add `.cursor/hooks.json`:
 
 ```json
-{ "version": 1, "hooks": { "stop": [{ "command": "npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.7.1 scan --hook" }] } }
+{ "version": 1, "hooks": { "stop": [{ "command": "npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.8.0 scan --hook" }] } }
 ```
 
 **GitHub Action.** It posts one PR comment and fails on `critical` by default:
@@ -49,7 +51,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - uses: SkaleAgents/mcp-server@v0.7.1
+      - uses: SkaleAgents/mcp-server@v0.8.0
         with: { fail-on: high }
 ```
 

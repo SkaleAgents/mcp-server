@@ -1,6 +1,6 @@
 {
   "name": "skaleagents",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Scans the IaC, CI and package files your agent changed before it stops, and connects the SkaleAgents MCP server.",
   "author": { "name": "SkaleAgents", "url": "https://skaleagents.com" },
   "homepage": "https://skaleagents.com",

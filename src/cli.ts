@@ -2,11 +2,12 @@ import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync, type Stats, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { scanIac, severityRank } from "./iac/scan.js";
+import { scanSecrets } from "./secrets.js";
 import type { Finding, FindingSeverity } from "./review.js";
 
 const usage = `Usage: skaleagents-swarm scan [paths...] [options]
 
-Scans IaC, CI and package files locally. No account or network needed.
+Scans IaC, CI and package files, and any file for committed secrets, locally. No account or network needed.
 
   --changed              Scan files changed against HEAD plus untracked files
   --min-severity <s>     Hide findings below info|low|medium|high|critical (default low)
@@ -22,7 +23,7 @@ Suppress a finding with a comment on its line or the line above:
 const candidate = /\.(tf|tfvars|hcl|ya?ml|json|bicep)$|(^|[/\\])(Dockerfile|Containerfile)[^/\\]*$/;
 const skippedDirs = new Set([".git", "node_modules", "vendor", "dist", "build", ".terraform", ".next"]);
 const skippedFiles = /(^|[/\\])(package-lock\.json|tsconfig[^/\\]*\.json|composer\.lock|pnpm-lock\.yaml|yarn\.lock)$/;
-const maxFiles = 2000;
+const maxFiles = 20000;
 const severities = Object.keys(severityRank) as FindingSeverity[];
 
 export type FileFinding = Finding & { file: string };
@@ -36,7 +37,7 @@ function walk(path: string, out: string[]) {
     return;
   }
   if (stat.isFile()) {
-    if (candidate.test(path) && !skippedFiles.test(path)) out.push(path);
+    out.push(path);
     return;
   }
   if (!stat.isDirectory()) return;
@@ -49,6 +50,27 @@ function git(args: string[]) {
   return execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
     .split("\0")
     .filter(Boolean);
+}
+
+// In a git repo, list tracked and untracked-but-not-ignored files so .gitignore keeps build output out of the count.
+function listFiles(paths: string[], warnings: string[]): string[] {
+  let files: string[] = [];
+  try {
+    files = git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...(paths.length ? paths : ["."])]).filter((file) => {
+      try {
+        return lstatSync(file).isFile();
+      } catch {
+        return false; // Deleted in the working tree.
+      }
+    });
+  } catch {
+    for (const path of paths.length ? paths : ["."]) walk(path, files);
+  }
+  if (files.length > maxFiles) {
+    warnings.push(`file limit reached: ${files.length - maxFiles} files not scanned`);
+    files = files.slice(0, maxFiles);
+  }
+  return files;
 }
 
 export function changedFiles(): string[] {
@@ -162,13 +184,20 @@ export async function runScan(argv: string[]): Promise<number> {
     failOn ??= "high";
   }
 
+  const warnings: string[] = [];
   const files: string[] = [];
   if (changed) {
     for (const file of changedFiles()) walk(file, files);
   }
-  for (const path of paths.length || changed ? paths : ["."]) walk(path, files);
-  const scanned = scanFiles([...new Set(files)], minSeverity);
-  const { suppressed, warnings } = scanned;
+  if (paths.length || !changed) files.push(...listFiles(paths, warnings));
+  if (files.length >= maxFiles) warnings.push("file limit reached: some files were not scanned");
+  const unique = [...new Set(files)];
+  const scanned = scanFiles(unique.filter((file) => candidate.test(file) && !skippedFiles.test(file)), minSeverity);
+  const secrets = scanSecrets(unique);
+  scanned.findings = scanned.findings.concat(secrets.findings);
+  const suppressed = scanned.suppressed + secrets.suppressed;
+  warnings.push(...scanned.warnings);
+  if (secrets.truncated) warnings.push("secret findings capped at 1000");
   if (writeBaseline) {
     const keys = [...new Set(scanned.findings.map(baselineKey))].sort();
     writeFileSync(writeBaseline, `${JSON.stringify({ version: 1, findings: keys }, null, 2)}\n`);
