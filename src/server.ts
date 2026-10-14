@@ -73,7 +73,7 @@ export function createServer(remote = false) {
       description:
         "Review individual source snippets or parsed infrastructure for security, reliability, and cost risks. Application checks include infrastructure bottlenecks: a disabled timeout, a one-connection pool, and an unbounded retry limit. For a whole application or Next.js architecture consultation, use plan_architecture_review and review_application_architecture instead.",
       annotations: {
-        readOnlyHint: true,
+        readOnlyHint: false,
         destructiveHint: false,
         openWorldHint: false,
       },
@@ -175,7 +175,7 @@ export function createServer(remote = false) {
             : "") +
           "Parse Terraform HCL/JSON, CloudFormation YAML/JSON, Kubernetes manifests, Pulumi YAML, Pulumi programs, or Docker Compose. Includes Dockerfile, GitHub Actions, Helm templates, Ansible playbooks, Bicep files, ARM templates, GitLab CI, Azure Pipelines, Cloud Build, tfvars, Serverless Framework, a standalone IAM policy, and package.json. Helm templates, Ansible facts, Bicep modules, ARM expressions, pipelines, Serverless Framework config, and IAM policies are not executed. Conditions are not evaluated. Terraform module sources are not fetched. Check security, reliability and cost rules with resource locations and remediation. Pulumi programs are scanned as text.",
         annotations: {
-          readOnlyHint: true,
+          readOnlyHint: false,
           destructiveHint: false,
           openWorldHint: false,
         },

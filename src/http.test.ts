@@ -86,6 +86,24 @@ test("authenticated stateless clients initialize list and call shared review too
       "scan_iac_stub",
     ],
   );
+  // Tools that save a review to the account write data, so they are not read-only.
+  assert.deepEqual(
+    Object.fromEntries(
+      tools.result.tools.map(
+        (tool: { name: string; annotations: { readOnlyHint: boolean } }) => [
+          tool.name,
+          tool.annotations.readOnlyHint,
+        ],
+      ),
+    ),
+    {
+      plan_architecture_review: true,
+      review_application_architecture: false,
+      review_architecture: false,
+      scan_iac: false,
+      scan_iac_stub: false,
+    },
+  );
   const review = await (
     await call("tools/call", {
       name: "review_architecture",
