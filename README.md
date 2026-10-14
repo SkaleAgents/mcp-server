@@ -113,9 +113,10 @@ in every result. An empty finding list is not proof that a system is secure.
 The web app hosts `https://skaleagents.com/mcp` using `handleMcpRequest` from
 `@skaleagents/swarm/http`. Audit workers import `scanIac` from
 `@skaleagents/swarm/scan`. It validates each bearer credential with the API's
-`/api/oauth/mcp-token` endpoint before running a tool. Tokens are bound to the
-MCP resource and cannot access unrelated API routes. Credentials are not
-forwarded to the public bot directory.
+`/api/oauth/mcp-token` endpoint before running a tool. A successful check is
+reused for up to 60 seconds, so a revoked token can run tools for up to a
+minute. Tokens are bound to the MCP resource and cannot access unrelated API
+routes. Credentials are not forwarded to the public bot directory.
 
 `protectedResourceMetadata` exports the discovery response for
 `/.well-known/oauth-protected-resource/mcp`.
