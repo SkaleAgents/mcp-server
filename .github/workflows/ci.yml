@@ -2,19 +2,10 @@ name: CI
 
 on:
   workflow_dispatch:
+  # PRs only: a squash merge to main is the commit the PR already tested.
   pull_request:
     paths-ignore:
-      - 'README.md'
-      - 'AGENTS.md'
-      - 'CLAUDE.md'
-      - 'docs/**/*.md'
-  push:
-    branches: [main]
-    paths-ignore:
-      - 'README.md'
-      - 'AGENTS.md'
-      - 'CLAUDE.md'
-      - 'docs/**/*.md'
+      - '**/*.md'
 
 permissions:
   contents: read
