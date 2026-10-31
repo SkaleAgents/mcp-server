@@ -21,17 +21,24 @@ type OAuthTokenResponse = {
   access_token?: unknown;
   refresh_token?: unknown;
   expires_in?: unknown;
+  error?: unknown;
+  error_description?: unknown;
 };
+
+/** The API refused a new connection because the account has used all its MCP seats. */
+class SeatLimitError extends Error {}
 
 export type AuthResult =
   | { ok: true; userId?: string }
   | {
       ok: false;
       reason: "oauth_required" | "oauth_failed" | "unauthorized" | "api_unavailable";
-    };
+    }
+  | { ok: false; reason: "seat_limit"; message: string };
 
 let cachedCredentials: OAuthCredentials | null = null;
 let authenticationInFlight: Promise<string> | null = null;
+let seatLimitMessage: string | null = null;
 
 /**
  * Validate the API bearer token before running any tool. OAuth starts in the
@@ -39,6 +46,9 @@ let authenticationInFlight: Promise<string> | null = null;
  */
 export async function requireApiAuth(): Promise<AuthResult> {
   const token = await getAccessToken();
+  if (!token && seatLimitMessage) {
+    return { ok: false, reason: "seat_limit", message: seatLimitMessage };
+  }
   if (!token) {
     return {
       ok: false,
@@ -73,7 +83,9 @@ export async function getApiAccessToken(): Promise<string | null> {
 
 export function unauthorizedContent(reason: AuthResult & { ok: false }) {
   const text =
-    reason.reason === "oauth_required"
+    reason.reason === "seat_limit"
+      ? reason.message
+      : reason.reason === "oauth_required"
       ? "MCP OAuth is disabled. Set SKALEAGENTS_API_TOKEN or enable OAuth."
       : reason.reason === "oauth_failed"
         ? "MCP sign-in could not be completed. Check the browser window and try again."
@@ -97,9 +109,11 @@ async function getAccessToken(): Promise<string | null> {
     });
   }
 
+  seatLimitMessage = null;
   try {
     return await authenticationInFlight;
-  } catch {
+  } catch (error) {
+    if (error instanceof SeatLimitError) seatLimitMessage = error.message;
     return null;
   }
 }
@@ -287,6 +301,9 @@ async function fetchToken(
   });
   const payload = (await response.json().catch(() => ({}))) as OAuthTokenResponse;
   if (!response.ok) {
+    if (payload.error === "mcp_seat_limit_reached" && typeof payload.error_description === "string") {
+      throw new SeatLimitError(payload.error_description);
+    }
     throw new Error(`OAuth token request failed with status ${response.status}`);
   }
   return payload;

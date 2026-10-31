@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { afterEach, describe, it } from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { requireApiAuth } from "./auth.js";
+import { requireApiAuth, unauthorizedContent, type AuthResult } from "./auth.js";
 
 const originalFetch = globalThis.fetch;
 const originalToken = process.env.SKALEAGENTS_API_TOKEN;
 const originalUrl = process.env.PLATFORM_API_URL;
 const originalOAuthEnabled = process.env.SKALEAGENTS_OAUTH_ENABLED;
 const originalOAuthCache = process.env.SKALEAGENTS_OAUTH_CACHE;
+const originalPath = process.env.PATH;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -21,6 +22,7 @@ afterEach(() => {
   else process.env.SKALEAGENTS_OAUTH_ENABLED = originalOAuthEnabled;
   if (originalOAuthCache === undefined) delete process.env.SKALEAGENTS_OAUTH_CACHE;
   else process.env.SKALEAGENTS_OAUTH_CACHE = originalOAuthCache;
+  process.env.PATH = originalPath;
 });
 
 describe("requireApiAuth", () => {
@@ -141,6 +143,55 @@ describe("requireApiAuth", () => {
       };
       assert.equal(saved.accessToken, "fresh-access");
       assert.equal(saved.refreshToken, "refresh-two");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+  it("shows the API's seat-limit message when a new connection is refused", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "skaleagents-oauth-"));
+    process.env.PLATFORM_API_URL = "http://localhost:8083";
+    process.env.SKALEAGENTS_OAUTH_CACHE = join(directory, "oauth.json");
+    delete process.env.SKALEAGENTS_API_TOKEN;
+    // A stand-in browser that approves at once by calling the local redirect URI.
+    const browser = `#!${process.execPath}
+const url = new URL(process.argv[process.argv.length - 1]);
+const back = new URL(url.searchParams.get("redirect_uri"));
+back.searchParams.set("code", "code-1");
+back.searchParams.set("state", url.searchParams.get("state"));
+fetch(back).catch(() => {});
+`;
+    for (const name of ["open", "xdg-open"]) {
+      await writeFile(join(directory, name), browser);
+      await chmod(join(directory, name), 0o755);
+    }
+    process.env.PATH = `${directory}:${originalPath}`;
+    const message = "You're using all 1 MCP connection on your plan.";
+
+    globalThis.fetch = async (input, init) => {
+      const url = String(input);
+      if (url.startsWith("http://127.0.0.1")) return originalFetch(input, init);
+      if (url.endsWith("/.well-known/oauth-authorization-server")) {
+        return new Response(
+          JSON.stringify({
+            authorization_endpoint: "http://localhost:8083/oauth/authorize",
+            token_endpoint: "http://localhost:8083/api/oauth/token",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/api/oauth/token")) {
+        return new Response(
+          JSON.stringify({ error: "mcp_seat_limit_reached", error_description: message }),
+          { status: 403 },
+        );
+      }
+      throw new Error(`unexpected request: ${url}`);
+    };
+
+    try {
+      const result = await requireApiAuth();
+      assert.deepEqual(result, { ok: false, reason: "seat_limit", message });
+      assert.equal(unauthorizedContent(result as AuthResult & { ok: false }).content[0].text, message);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
