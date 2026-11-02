@@ -1,5 +1,9 @@
 import { getApiUrl } from "./config.js";
 
+// pg `new Pool({ max: 1 })` and knex/Sequelize `pool: { max: 1 }` cap the pool through `max`.
+const onePoolPattern =
+  /(?:pool_size|max_connections|connectionLimit|maxPoolSize|maximumPoolSize|max_pool_size)\s*[:=]\s*1\b|(?:new\s+Pool\s*\(\s*|\bpool\s*:\s*)\{[^}]*\bmax\s*:\s*1\b/;
+
 export type FindingSeverity = "info" | "low" | "medium" | "high" | "critical";
 
 export type Finding = {
@@ -186,9 +190,7 @@ export function architectureFindings(
   }
   if (
     shouldInclude(focusValue, "reliability") &&
-    /(?:pool_size|max_connections|connectionLimit|maxPoolSize|maximumPoolSize|max_pool_size)\s*[:=]\s*1\b/.test(
-      content,
-    )
+    onePoolPattern.test(content)
   ) {
     findings.push({
       severity: "high",
@@ -267,7 +269,7 @@ export function architectureFindings(
       "Outbound call has no timeout":
         /(?:^|[^.\w])(?:timeout|read_timeout|connect_timeout|request_timeout|readTimeout|connectTimeout)\s*[:=]\s*(?:0|false|none)\b/i,
       "Connection pool is capped at one":
-        /(?:pool_size|max_connections|connectionLimit|maxPoolSize|maximumPoolSize|max_pool_size)\s*[:=]\s*1\b/,
+        onePoolPattern,
       "Retry limit is unbounded":
         /(?:max_?retries|retry_?count|retries)\s*[:=]\s*(?:-1|Infinity)\b/i,
       "Database connection limit is unlimited":
