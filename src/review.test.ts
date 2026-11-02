@@ -111,6 +111,19 @@ describe("architectureFindings", () => {
     );
   });
 
+  it("flags a pg or knex pool capped at one through max", () => {
+    const pool = (content: string) =>
+      architectureFindings(content, "reliability").filter(
+        (f) => f.title === "Connection pool is capped at one",
+      );
+    assert.equal(pool("const pool = new Pool({ max: 1 });").length, 1);
+    assert.equal(pool("const pool = new Pool({\n  connectionString,\n  max: 1,\n});").length, 1);
+    assert.equal(pool("knex({ client: 'pg', pool: { min: 0, max: 1 } })")[0]?.location?.line, 1);
+    for (const safe of ["new Pool({ max: 10 })", "new Pool({ max: 1000 })", "retry({ max: 1 })", "z.string().max(1)", "pool: { min: 1, max: 5 }"]) {
+      assert.equal(pool(safe).length, 0, safe);
+    }
+  });
+
   it("flags an unlimited database pool, a disabled memory limit, and a root container user", () => {
     const findings = architectureFindings(
       "db.SetMaxOpenConns(0)\nmem_limit: 0\nUSER root\n",
