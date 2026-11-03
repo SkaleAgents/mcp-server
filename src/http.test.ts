@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { after, before, mock, test } from "node:test";
 import { handleMcpRequest, protectedResourceMetadata } from "./http.js";
 
+process.env.MCP_HTTP_WORKERS = "0";
 const realFetch = globalThis.fetch;
 const url = "https://skaleagents.com";
 let active = true;
