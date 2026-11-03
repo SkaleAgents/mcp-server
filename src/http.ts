@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { createServer } from "./server.js";
 import { getApiUrl } from "./config.js";
-import { requestAuthorization } from "./saved-review.js";
+import { PoolBusy, PoolTimeout, WorkerPool } from "./http-pool.js";
+import { serveParsed, type ServedReply } from "./http-serve.js";
 
 const resource = process.env.MCP_RESOURCE_URL ?? "https://skaleagents.com/mcp";
 const metadataUrl = `${new URL(resource).origin}/.well-known/oauth-protected-resource/mcp`;
@@ -59,6 +58,21 @@ function rememberValidation(key: string, until: number) {
   if (!validatedUntil.has(key) && validatedUntil.size >= validationCacheLimit)
     validatedUntil.delete(validatedUntil.keys().next().value!);
   validatedUntil.set(key, until);
+}
+
+const perTokenLimit = 2;
+const tokensInFlight = new Map<string, number>();
+let pool: WorkerPool | null | undefined;
+
+// MCP_HTTP_WORKERS=0 runs requests inline (tests and local debugging).
+function workerPool(): WorkerPool | null {
+  if (pool !== undefined) return pool;
+  const size = Number(process.env.MCP_HTTP_WORKERS ?? 2);
+  pool = size > 0
+    ? new WorkerPool(new URL("./http-worker.js", import.meta.url), size,
+        Number(process.env.MCP_HTTP_TIMEOUT_MS ?? 20_000), 32)
+    : null;
+  return pool;
 }
 
 export async function handleMcpRequest(request: Request): Promise<Response> {
@@ -147,30 +161,35 @@ export async function handleMcpRequest(request: Request): Promise<Response> {
     });
   }
 
-  return requestAuthorization.run(authorization, async () => {
-  const server = createServer(true);
-  const transport = new WebStandardStreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
-    enableJsonResponse: true,
-  });
+  // One client can't take every worker: at most two requests in flight per token.
+  const inFlight = tokensInFlight.get(tokenKey) ?? 0;
+  if (inFlight >= perTokenLimit)
+    return json(429, { error: "too_many_concurrent_requests" }, { "Retry-After": "5" });
+  tokensInFlight.set(tokenKey, inFlight + 1);
   try {
-    await server.connect(transport);
-    const response = await transport.handleRequest(request, {
-      parsedBody: body,
-    });
-    // Finish the JSON response before closing this request-scoped transport.
-    const responseBody = await response.arrayBuffer();
-    const responseHeaders = new Headers(response.headers);
+    const job = {
+      authorization,
+      url: request.url,
+      headers: [...request.headers.entries()],
+      body,
+    };
+    const pool = workerPool();
+    const reply: ServedReply = pool
+      ? await pool.run(job)
+      : await serveParsed(job.authorization, job.url, job.headers, job.body);
+    const responseHeaders = new Headers(reply.headers);
     for (const [key, value] of Object.entries(headers))
       responseHeaders.set(key, value);
-    return new Response(responseBody.byteLength ? responseBody : null, {
-      status: response.status,
-      headers: responseHeaders,
-    });
-  } catch {
+    return new Response(reply.body, { status: reply.status, headers: responseHeaders });
+  } catch (error) {
+    if (error instanceof PoolBusy)
+      return json(503, { error: "server_busy" }, { "Retry-After": "5" });
+    if (error instanceof PoolTimeout)
+      return json(504, { error: "mcp_request_timeout" });
     return json(500, { error: "mcp_request_failed" });
   } finally {
-    await server.close();
+    const left = (tokensInFlight.get(tokenKey) ?? 1) - 1;
+    if (left > 0) tokensInFlight.set(tokenKey, left);
+    else tokensInFlight.delete(tokenKey);
   }
-  });
 }
