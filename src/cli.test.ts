@@ -39,6 +39,16 @@ describe("scanFiles", () => {
     assert.equal(finding?.resource, "aws_s3_bucket.b");
     assert.equal(finding?.location?.line, 1);
   });
+
+  it("skips and warns on files over 2 MB", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sa-cli-"));
+    const big = join(dir, "big.tf");
+    writeFileSync(big, `${bucket}\n#${"x".repeat(2 * 1024 * 1024)}`);
+    const { findings, warnings, unchecked } = scanFiles([big]);
+    assert.equal(findings.length, 0);
+    assert.match(warnings[0], /big\.tf: skipped, larger than 2 MB/);
+    assert.deepEqual(unchecked, warnings); // A --fail-on gate must not pass on a file that was skipped.
+  });
 });
 
 describe("suppression parsing", () => {

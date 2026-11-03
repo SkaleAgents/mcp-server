@@ -3,7 +3,13 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { afterEach, describe, it } from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { requireApiAuth, unauthorizedContent, type AuthResult } from "./auth.js";
+import {
+  assertSafeAuthorizationEndpoint,
+  browserCommand,
+  requireApiAuth,
+  unauthorizedContent,
+  type AuthResult,
+} from "./auth.js";
 
 const originalFetch = globalThis.fetch;
 const originalToken = process.env.SKALEAGENTS_API_TOKEN;
@@ -195,5 +201,51 @@ fetch(back).catch(() => {});
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+});
+
+describe("authorization endpoint safety", () => {
+  const api = "https://api.example.com";
+
+  it("accepts https on the API origin and http on localhost", () => {
+    assertSafeAuthorizationEndpoint(`${api}/oauth/authorize`, api);
+    assertSafeAuthorizationEndpoint("http://localhost:8082/oauth/authorize", "http://localhost:8082");
+  });
+
+  it("rejects other origins, non-https, and non-http schemes", () => {
+    for (const [endpoint, apiUrl] of [
+      ["https://evil.example/authorize", api],
+      ["http://api.example.com/authorize", api],
+      ["http://api.example.com/authorize", "http://api.example.com"],
+      ["file:///etc/passwd", api],
+      ["javascript:alert(1)", api],
+      ["not a url", api],
+      ["http://localhost:9999/authorize", "http://localhost:8082"],
+    ])
+      assert.throws(() => assertSafeAuthorizationEndpoint(endpoint, apiUrl), /authorization endpoint/);
+  });
+
+  it("refuses to open a browser for a metadata endpoint on another origin", async () => {
+    process.env.PLATFORM_API_URL = "http://localhost:8083";
+    process.env.SKALEAGENTS_OAUTH_CACHE = join(tmpdir(), "skaleagents-no-such-cache.json");
+    delete process.env.SKALEAGENTS_API_TOKEN;
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          authorization_endpoint: "https://evil.example/authorize",
+          token_endpoint: "http://localhost:8083/api/oauth/token",
+        }),
+        { status: 200 },
+      );
+    assert.deepEqual(await requireApiAuth(), { ok: false, reason: "oauth_failed" });
+  });
+});
+
+describe("browserCommand", () => {
+  it("opens Windows URLs through rundll32 without a shell", () => {
+    const url = "https://api.example.com/a?x=1&y=2";
+    assert.deepEqual(browserCommand(url, "win32"), ["rundll32", ["url.dll,FileProtocolHandler", url]]);
+    assert.deepEqual(browserCommand(url, "darwin"), ["open", [url]]);
+    assert.deepEqual(browserCommand(url, "linux"), ["xdg-open", [url]]);
   });
 });
