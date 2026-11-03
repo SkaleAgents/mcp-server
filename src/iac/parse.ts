@@ -1625,9 +1625,7 @@ function parseAnsible(content: string): ParsedIac {
 }
 
 function maskIaCComments(content: string): string {
-  const withoutBlock = content.replace(/\/\*[\s\S]*?\*\//g, (match) =>
-    match.replace(/[^\n]/g, " "),
-  );
+  const withoutBlock = blankComments(content);
   return withoutBlock
     .split("\n")
     .map((line) => {

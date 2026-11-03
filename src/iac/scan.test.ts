@@ -4,6 +4,7 @@ import { scanIac } from "./scan.js";
 import {
   looksLikeDockerfile,
   looksLikeGithubWorkflow,
+  looksLikeBicep,
   looksLikeIac,
   ScanInputError,
 } from "./parse.js";
@@ -2508,4 +2509,19 @@ describe("hostile input", () => {
       assert.ok(performance.now() - started < 10_000, `took ${Math.round(performance.now() - started)} ms`);
     });
   }
+});
+
+describe("block comment masking", () => {
+  const bicep = "resource s 'Microsoft.Storage/storageAccounts@2023-01-01' = {}";
+
+  it("masks block comments across lines and keeps code after them", () => {
+    assert.equal(looksLikeBicep(`/* ${bicep}\n${bicep} */`), false);
+    assert.equal(looksLikeBicep(`/* note\nmore */\n${bicep}`), true);
+  });
+
+  it("handles many unclosed block comment openers in linear time", () => {
+    const started = performance.now();
+    assert.equal(looksLikeBicep("/* ".repeat(170000)), false);
+    assert.ok(performance.now() - started < 500, "unclosed /* input must not be quadratic");
+  });
 });
