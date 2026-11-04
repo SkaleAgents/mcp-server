@@ -10,8 +10,10 @@ asks. Setup steps for Cursor, Claude Code, Claude Desktop, ChatGPT, and Codex
 are on the [MCP config page](https://skaleagents.com/mcp-config).
 
 Tools: `plan_architecture_review`, `review_application_architecture`,
-`review_architecture`, and `scan_iac`. The older `scan_iac_stub` name remains
-an alias for the IaC scanner.
+`review_architecture`, `scan_iac`, and `scan_dependencies`. The older
+`scan_iac_stub` name remains an alias for the IaC scanner.
+
+`scan_dependencies` takes the text of one lockfile (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `composer.lock`, `requirements.txt` or `go.sum`, up to 2 MB and 5000 packages) and returns known CVEs from OSV.dev as `CVE001`. It sends ecosystem, package name and version to `api.osv.dev`, never the lockfile. A failed lookup is an error, not a clean result. For larger lockfiles use `scan --cves` locally.
 
 `review_architecture` accepts application source or infrastructure text. Your AI
 client reads the files in its workspace and sends the relevant content through
@@ -34,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.9.3 scan --cves --fail-on high
+      - run: npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.10.0 scan --cves --fail-on high
 ```
 
 Suppress an intended setting with a comment on the flagged line or the line above: `# skaleagents-ignore DATA001 public asset bucket`.
@@ -49,7 +51,7 @@ Suppress an intended setting with a comment on the flagged line or the line abov
 **Cursor.** Add `.cursor/hooks.json`:
 
 ```json
-{ "version": 1, "hooks": { "stop": [{ "command": "npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.9.3 scan --hook" }] } }
+{ "version": 1, "hooks": { "stop": [{ "command": "npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.10.0 scan --hook" }] } }
 ```
 
 **GitHub Action.** It posts one PR comment and fails on `critical` by default:
@@ -63,7 +65,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - uses: SkaleAgents/mcp-server@v0.9.3
+      - uses: SkaleAgents/mcp-server@v0.10.0
         with: { fail-on: high }
 ```
 
