@@ -18,6 +18,11 @@ jobs:
         with:
           persist-credentials: false
 
+      # Installed outside the checkout: npx here would resolve this repo's own, unbuilt package.
       # Sends package names and versions, not source, to api.osv.dev.
       - name: Check lockfile for known CVEs
-        run: npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.9.3 scan --cves --fail-on high package-lock.json
+        run: |
+          tool="$RUNNER_TEMP/skaleagents-tool"
+          mkdir -p "$tool"
+          (cd "$tool" && npm install --no-save --no-package-lock --ignore-scripts --registry=https://registry.npmjs.org @skaleagents/swarm@0.9.3)
+          node "$tool/node_modules/@skaleagents/swarm/dist/index.js" scan --cves --fail-on high package-lock.json
