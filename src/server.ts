@@ -259,12 +259,9 @@ export function createServer(remote = false) {
       });
       let packages: ReturnType<typeof parseLockfile>;
       try {
-        packages = parseLockfile(filename, filename, content);
+        packages = parseLockfile(filename, filename, content, { maxPackages: 5000, locate: false });
       } catch (error) {
-        return fail("invalid_input", `${filename} could not be parsed: ${error instanceof Error ? error.message : String(error)}`);
-      }
-      if (packages.length > 5000) {
-        return fail("invalid_input", `${packages.length} packages is over the hosted limit of 5000. Run skaleagents-swarm scan --cves locally.`);
+        return fail("invalid_input", `${filename} could not be read: ${error instanceof Error ? error.message : String(error)}. The hosted limit is 5000 packages; run skaleagents-swarm scan --cves locally for more.`);
       }
       try {
         // Answer before the hosted request limit so a slow OSV is reported, not a bare 504.
