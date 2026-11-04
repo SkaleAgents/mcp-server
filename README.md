@@ -19,11 +19,23 @@ the MCP tool for a structured review.
 
 ## Scan locally, in agent hooks, and in pull requests
 
-`npx -y @skaleagents/swarm scan [paths...]` scans IaC, CI, Dockerfile and package files on your machine. It needs no account and sends nothing over the network. Use `--changed` for files changed against HEAD, `--fail-on high` to exit 1, and `--json` for machine output.
+`npx -y @skaleagents/swarm scan [paths...]` scans IaC, CI, Dockerfile and package files on your machine. It needs no account and sends nothing over the network unless you pass `--cves`. Use `--changed` for files changed against HEAD, `--fail-on high` to exit 1, and `--json` for machine output.
 
 Adopt it on an existing repo: `npx @skaleagents/swarm scan --write-baseline .skaleagents-baseline.json`, commit the file, and later scans show only new findings. The Action reads the baseline from the PR's base commit, so a PR cannot hide findings by editing it. Findings match on rule, file and resource, not line number.
 
 `scan` also looks for committed secrets in any file it reads (AWS, GitHub, Slack, Stripe, Google, npm and Anthropic keys, private keys) as `SECRET001`, critical. The value is never printed. Git-ignored files such as a local `.env` are skipped. Rotate the key; only suppress a documented example.
+
+`scan --cves` also checks the exact package versions in lockfiles against [OSV.dev](https://osv.dev) (GitHub Advisories, PyPI, Go, Packagist) and reports known CVEs as `CVE001`. It reads `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `composer.lock`, `requirements*.txt` (exact `==` pins only) and `go.sum`. It sends package names and versions to `api.osv.dev`, never source, and skips npm packages that do not come from the public registry. If the lookup fails, the scan exits 2 rather than reporting a clean result. Severity comes from the advisory rating, and unrated advisories show as `medium`. Accept a known CVE with the baseline file. In the Action, set `cves: true`; it then checks every tracked lockfile, not only changed ones. The Action only runs on pull requests, so also run a schedule to catch CVEs published after merge:
+
+```yaml
+on: { schedule: [{ cron: "0 6 * * *" }] }
+jobs:
+  cves:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.9.0 scan --cves --fail-on high
+```
 
 Suppress an intended setting with a comment on the flagged line or the line above: `# skaleagents-ignore DATA001 public asset bucket`.
 
@@ -37,7 +49,7 @@ Suppress an intended setting with a comment on the flagged line or the line abov
 **Cursor.** Add `.cursor/hooks.json`:
 
 ```json
-{ "version": 1, "hooks": { "stop": [{ "command": "npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.8.5 scan --hook" }] } }
+{ "version": 1, "hooks": { "stop": [{ "command": "npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.9.0 scan --hook" }] } }
 ```
 
 **GitHub Action.** It posts one PR comment and fails on `critical` by default:
@@ -51,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - uses: SkaleAgents/mcp-server@v0.8.5
+      - uses: SkaleAgents/mcp-server@v0.9.0
         with: { fail-on: high }
 ```
 

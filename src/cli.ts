@@ -2,18 +2,20 @@ import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync, type Stats, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { scanIac, severityRank } from "./iac/scan.js";
+import { collectPackages, lookupCves } from "./cves.js";
 import { scanSecrets } from "./secrets.js";
 import type { Finding, FindingSeverity } from "./review.js";
 
 const usage = `Usage: skaleagents-swarm scan [paths...] [options]
 
-Scans IaC, CI and package files, and any file for committed secrets, locally. No account or network needed.
+Scans IaC, CI and package files, and any file for committed secrets, locally. No account or network needed, unless --cves is set.
 
   --changed              Scan files changed against HEAD plus untracked files
   --min-severity <s>     Hide findings below info|low|medium|high|critical (default low)
   --fail-on <s>          Exit 1 when a finding is at or above this severity
   --baseline <file>      Hide findings already listed in this baseline file (.skaleagents-baseline.json is used automatically)
   --write-baseline <file>  Write current findings to a baseline file and exit 0
+  --cves                 Check lockfile packages for known CVEs. Sends package names and versions (no source) to api.osv.dev
   --json                 Print JSON instead of text
   --hook                 Agent stop hook mode for Claude Code and Cursor (implies --changed)
 
@@ -151,6 +153,7 @@ export async function runScan(argv: string[]): Promise<number> {
   let changed = false;
   let json = false;
   let hook = false;
+  let cves = false;
   let minSeverity: FindingSeverity = "low";
   let failOn: FindingSeverity | undefined;
   let baselinePath: string | undefined;
@@ -162,6 +165,7 @@ export async function runScan(argv: string[]): Promise<number> {
       break;
     } else if (arg === "--changed") changed = true;
     else if (arg === "--json") json = true;
+    else if (arg === "--cves") cves = true;
     else if (arg === "--hook") hook = changed = true;
     else if (arg === "--min-severity") minSeverity = severityArg(argv[++i], arg);
     else if (arg === "--baseline" || arg === "--write-baseline") {
@@ -197,6 +201,16 @@ export async function runScan(argv: string[]): Promise<number> {
   scanned.findings = scanned.findings.concat(secrets.findings);
   const suppressed = scanned.suppressed + secrets.suppressed;
   warnings.push(...scanned.warnings);
+  if (cves) {
+    const found = collectPackages(unique);
+    warnings.push(...found.warnings);
+    try {
+      scanned.findings = scanned.findings.concat(await lookupCves(found.packages));
+    } catch (error) {
+      console.error(`CVE lookup failed: ${error instanceof Error ? error.message : String(error)}`);
+      return 2;
+    }
+  }
   if (secrets.truncated) warnings.push("secret findings capped at 1000");
   if (writeBaseline) {
     const keys = [...new Set(scanned.findings.map(baselineKey))].sort();
