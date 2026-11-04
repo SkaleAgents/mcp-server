@@ -1,0 +1,23 @@
+name: CVE scan
+
+on:
+  workflow_dispatch:
+  # The PR Action cannot see a CVE published after merge, so check the lockfile daily.
+  schedule:
+    - cron: "17 6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  cves:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # Sends package names and versions, not source, to api.osv.dev.
+      - name: Check lockfile for known CVEs
+        run: npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.9.3 scan --cves --fail-on high package-lock.json
