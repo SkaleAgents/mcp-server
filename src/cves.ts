@@ -128,23 +128,30 @@ const parsers: [RegExp, (text: string) => Entry[]][] = [
 
 export const lockfileNames = ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "composer.lock", "requirements.txt", "go.sum"] as const;
 
-// Throws on malformed input. Callers decide whether that is a warning (CLI) or a tool error (hosted).
-export function parseLockfile(name: string, file: string, text: string): Pkg[] {
+// Throws on malformed input or when more than maxPackages unique packages are found. Line numbers are
+// skipped (line 1) when locating them would cost more than 50M line comparisons.
+export function parseLockfile(name: string, file: string, text: string, opts: { maxPackages?: number; locate?: boolean } = {}): Pkg[] {
   const parse = parsers.find(([re]) => re.test(name))?.[1];
   if (!parse) return [];
-  const lines = text.split("\n");
   const seen = new Set<string>();
-  const packages: Pkg[] = [];
-  for (const [ecosystem, pkg, version] of parse(text)) {
-    const key = `${ecosystem}\0${pkg}\0${version}`;
+  const entries: Entry[] = [];
+  for (const entry of parse(text)) {
+    const key = entry.join("\0");
     if (seen.has(key)) continue;
     seen.add(key);
-    // shortcut: first line that mentions the name, not the exact entry; upgrade if line numbers matter to users.
-    const hit = lines.findIndex((l) => l.includes(pkg) && l.includes(version));
-    const any = hit >= 0 ? hit : lines.findIndex((l) => l.includes(pkg));
-    packages.push({ ecosystem, name: pkg, version, file, line: any + 1 || 1 });
+    entries.push(entry);
+    if (opts.maxPackages && entries.length > opts.maxPackages) {
+      throw new Error(`more than ${opts.maxPackages} packages`);
+    }
   }
-  return packages;
+  const lines = text.split("\n");
+  const locate = opts.locate !== false && entries.length * lines.length <= 50_000_000;
+  return entries.map(([ecosystem, pkg, version]) => {
+    // shortcut: first line that mentions the name, not the exact entry; upgrade if line numbers matter to users.
+    const hit = locate ? lines.findIndex((l) => l.includes(pkg) && l.includes(version)) : -1;
+    const any = locate && hit < 0 ? lines.findIndex((l) => l.includes(pkg)) : hit;
+    return { ecosystem, name: pkg, version, file, line: any + 1 || 1 };
+  });
 }
 
 export function collectPackages(files: string[]) {

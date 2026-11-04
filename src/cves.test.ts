@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { runScan } from "./cli.js";
-import { collectPackages, lookupCves, type Pkg } from "./cves.js";
+import { collectPackages, lookupCves, parseLockfile, type Pkg } from "./cves.js";
 
 const dir = mkdtempSync(join(tmpdir(), "sa-cve-"));
 const write = (name: string, text: string) => {
@@ -74,6 +74,12 @@ describe("collectPackages", () => {
       const findLinks = write("requirements-links.txt", "-f https://wheels.corp.example\ncorp-lib==1.0.0\n-ihttps://x.example/simple\n");
       assert.equal(collectPackages([findLinks]).packages.length, 0);
     }
+  });
+
+  it("stops at maxPackages and can skip line lookup", () => {
+    const lock = JSON.stringify({ packages: Object.fromEntries(Array.from({ length: 6 }, (_, i) => [`node_modules/p${i}`, { version: "1.0.0", resolved: `${npm}p${i}/-/p${i}-1.0.0.tgz` }])) });
+    assert.throws(() => parseLockfile("package-lock.json", "f", lock, { maxPackages: 5 }), /more than 5/);
+    assert.equal(parseLockfile("package-lock.json", "f", lock, { maxPackages: 6, locate: false }).every((p) => p.line === 1), true);
   });
 
   it("warns on a malformed lockfile and ignores other files", () => {
