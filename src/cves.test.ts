@@ -68,6 +68,8 @@ describe("collectPackages", () => {
     try {
       assert.deepEqual(collectPackages([req, sum]).packages.map((p) => p.name), ["golang.org/x/text"]);
     } finally {
+      process.env.GOPRIVATE = "corp.[a-z]*";
+      assert.equal(collectPackages([sum]).packages.length, 0);
       delete process.env.GOPRIVATE;
       const findLinks = write("requirements-links.txt", "-f https://wheels.corp.example\ncorp-lib==1.0.0\n-ihttps://x.example/simple\n");
       assert.equal(collectPackages([findLinks]).packages.length, 0);
