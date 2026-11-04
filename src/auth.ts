@@ -181,7 +181,23 @@ async function getMetadata(apiUrl: string): Promise<OAuthMetadata> {
     throw new Error("OAuth metadata is incomplete");
   }
 
+  assertSafeAuthorizationEndpoint(metadata.authorization_endpoint, apiUrl);
   return metadata as OAuthMetadata;
+}
+
+// The endpoint is opened in the user's browser, so it must stay on the API's own origin
+// and use https (plain http only for local development).
+export function assertSafeAuthorizationEndpoint(endpoint: string, apiUrl: string): void {
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    throw new Error("OAuth authorization endpoint is not a valid URL");
+  }
+  const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if (url.origin !== new URL(apiUrl).origin || !(url.protocol === "https:" || (url.protocol === "http:" && local))) {
+    throw new Error("OAuth authorization endpoint must be https and on the API origin");
+  }
 }
 
 async function authorizeInBrowser(authorizationEndpoint: string): Promise<{
@@ -373,14 +389,15 @@ function addressPort(server: ReturnType<typeof createServer>): number {
   return address.port;
 }
 
+// Arguments go straight to the program (no shell), so a URL cannot inject commands.
+export function browserCommand(url: string, platform = process.platform): [string, string[]] {
+  if (platform === "darwin") return ["open", [url]];
+  if (platform === "win32") return ["rundll32", ["url.dll,FileProtocolHandler", url]];
+  return ["xdg-open", [url]];
+}
+
 function openBrowser(url: string): void {
-  const command =
-    process.platform === "darwin"
-      ? "open"
-      : process.platform === "win32"
-        ? "cmd"
-        : "xdg-open";
-  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+  const [command, args] = browserCommand(url);
   const child = spawn(command, args, { detached: true, stdio: "ignore" });
   child.once("error", () => {
     console.error("Could not open a browser automatically. Open the URL printed above.");
