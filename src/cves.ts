@@ -126,28 +126,37 @@ const parsers: [RegExp, (text: string) => Entry[]][] = [
   [/^go\.sum$/, goSum],
 ];
 
+export const lockfileNames = ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "composer.lock", "requirements.txt", "go.sum"] as const;
+
+// Throws on malformed input. Callers decide whether that is a warning (CLI) or a tool error (hosted).
+export function parseLockfile(name: string, file: string, text: string): Pkg[] {
+  const parse = parsers.find(([re]) => re.test(name))?.[1];
+  if (!parse) return [];
+  const lines = text.split("\n");
+  const seen = new Set<string>();
+  const packages: Pkg[] = [];
+  for (const [ecosystem, pkg, version] of parse(text)) {
+    const key = `${ecosystem}\0${pkg}\0${version}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    // shortcut: first line that mentions the name, not the exact entry; upgrade if line numbers matter to users.
+    const hit = lines.findIndex((l) => l.includes(pkg) && l.includes(version));
+    const any = hit >= 0 ? hit : lines.findIndex((l) => l.includes(pkg));
+    packages.push({ ecosystem, name: pkg, version, file, line: any + 1 || 1 });
+  }
+  return packages;
+}
+
 export function collectPackages(files: string[]) {
   const packages: Pkg[] = [];
   const warnings: string[] = [];
-  const seen = new Set<string>();
   for (const path of files) {
     const name = basename(path);
-    const parse = parsers.find(([re]) => re.test(name))?.[1];
-    if (!parse) continue;
+    if (!parsers.some(([re]) => re.test(name))) continue;
     const file = relative(".", path);
     try {
       if (statSync(path).size > maxLockBytes) throw new Error("file too large");
-      const text = readFileSync(path, "utf8");
-      const lines = text.split("\n");
-      for (const [ecosystem, pkg, version] of parse(text)) {
-        const key = `${file}\0${ecosystem}\0${pkg}\0${version}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        // shortcut: first line that mentions the name, not the exact entry; upgrade if line numbers matter to users.
-        const hit = lines.findIndex((l) => l.includes(pkg) && l.includes(version));
-        const any = hit >= 0 ? hit : lines.findIndex((l) => l.includes(pkg));
-        packages.push({ ecosystem, name: pkg, version, file, line: any + 1 || 1 });
-      }
+      packages.push(...parseLockfile(name, file, readFileSync(path, "utf8")));
     } catch (error) {
       warnings.push(`${file}: could not read lockfile: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -172,25 +181,28 @@ const severityOf = (v: Vuln): FindingSeverity => {
   }
 };
 
-async function osvFetch(fetchImpl: typeof fetch, url: string, body?: unknown) {
+async function osvFetch(fetchImpl: typeof fetch, url: string, body?: unknown, deadline = Infinity) {
+  const left = deadline - Date.now();
+  if (left <= 0) throw new Error("lookup took too long");
   const res = await fetchImpl(url, {
     method: body ? "POST" : "GET",
     headers: body ? { "content-type": "application/json" } : undefined,
     body: body ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: AbortSignal.timeout(Math.min(timeoutMs, left)),
   });
   if (!res.ok) throw new Error(`${url} answered HTTP ${res.status}`);
   return (await res.json()) as unknown;
 }
 
 // Throws on any network or HTTP failure: a scan that could not check must not look clean.
-export async function lookupCves(packages: Pkg[], fetchImpl: typeof fetch = fetch): Promise<CveFinding[]> {
+// deadline is an epoch ms limit for the whole lookup; the hosted tool uses it to answer before the request time limit.
+export async function lookupCves(packages: Pkg[], fetchImpl: typeof fetch = fetch, deadline = Infinity): Promise<CveFinding[]> {
   const hits: [Pkg, string][] = [];
   for (let i = 0; i < packages.length; i += batchSize) {
     const chunk = packages.slice(i, i + batchSize);
     const data = (await osvFetch(fetchImpl, `${osv}/querybatch`, {
       queries: chunk.map((p) => ({ package: { name: p.name, ecosystem: p.ecosystem }, version: p.version })),
-    })) as { results?: { vulns?: { id: string }[] }[] };
+    }, deadline)) as { results?: { vulns?: { id: string }[] }[] };
     if (data.results?.length !== chunk.length) throw new Error("OSV returned an unexpected batch result");
     chunk.forEach((p, j) => data.results![j].vulns?.forEach((v) => hits.push([p, v.id])));
   }
@@ -199,7 +211,7 @@ export async function lookupCves(packages: Pkg[], fetchImpl: typeof fetch = fetc
   for (let i = 0; i < ids.length; i += detailParallelism) {
     await Promise.all(
       ids.slice(i, i + detailParallelism).map(async (id) => {
-        details.set(id, (await osvFetch(fetchImpl, `${osv}/vulns/${encodeURIComponent(id)}`)) as Vuln);
+        details.set(id, (await osvFetch(fetchImpl, `${osv}/vulns/${encodeURIComponent(id)}`, undefined, deadline)) as Vuln);
       }),
     );
   }

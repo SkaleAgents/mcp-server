@@ -9,6 +9,7 @@ let active = true;
 let audience = `${url}/mcp`;
 let unavailable = false;
 let expiresAt: number | undefined;
+let osvDown = false;
 let calls: { url: string; authorization: string | null }[] = [];
 const tokenChecks = () => calls.filter((c) => c.url.endsWith("/api/oauth/mcp-token")).length;
 before(async () => {
@@ -31,6 +32,14 @@ before(async () => {
         { status: unavailable ? 503 : active ? 200 : 401 },
       );
     if (target.endsWith("/api/bots")) return Response.json({ bots: [] });
+    if (target.startsWith("https://api.osv.dev/")) {
+      if (osvDown) return new Response("down", { status: 503 });
+      if (target.endsWith("/querybatch")) {
+        const { queries } = JSON.parse(String(init?.body));
+        return Response.json({ results: queries.map((q: { package: { name: string } }) => (q.package.name === "lodash" ? { vulns: [{ id: "GHSA-1" }] } : {})) });
+      }
+      return Response.json({ id: "GHSA-1", aliases: ["CVE-2021-23337"], database_specific: { severity: "HIGH" } });
+    }
     throw new Error("Unexpected outbound request");
   };
 });
@@ -83,6 +92,7 @@ test("authenticated stateless clients initialize list and call shared review too
       "plan_architecture_review",
       "review_application_architecture",
       "review_architecture",
+      "scan_dependencies",
       "scan_iac",
       "scan_iac_stub",
     ],
@@ -101,6 +111,7 @@ test("authenticated stateless clients initialize list and call shared review too
       plan_architecture_review: true,
       review_application_architecture: false,
       review_architecture: false,
+      scan_dependencies: true,
       scan_iac: false,
       scan_iac_stub: false,
     },
@@ -369,4 +380,31 @@ test("rejects untrusted origins and supports connector preflight", async () => {
     preflight.headers.get("access-control-allow-headers")!,
     /Authorization/,
   );
+});
+
+test("scan_dependencies reports CVEs from a pasted lockfile and never a clean result when OSV is down", async () => {
+  const lock = JSON.stringify({
+    packages: {
+      "node_modules/lodash": { version: "4.17.20", resolved: "https://registry.npmjs.org/lodash/-/lodash-4.17.20.tgz" },
+      "node_modules/other": { version: "1.0.0", resolved: "https://registry.npmjs.org/other/-/other-1.0.0.tgz" },
+      "node_modules/private": { version: "1.0.0", resolved: "https://npm.corp.example/private.tgz" },
+    },
+  });
+  const run = async (arguments_: unknown) =>
+    (await (await call("tools/call", { name: "scan_dependencies", arguments: arguments_ })).json()).result;
+  const ok = await run({ content: lock, filename: "package-lock.json" });
+  assert.equal(ok.isError, undefined);
+  assert.equal(ok.structuredContent.packagesChecked, 2);
+  assert.deepEqual(ok.structuredContent.findings.map((f: { title: string }) => f.title), ["CVE-2021-23337 in lodash@4.17.20"]);
+  assert.ok(!JSON.stringify(ok).includes("corp.example"));
+  assert.equal((await run({ content: "{nope", filename: "package-lock.json" })).isError, true);
+  assert.equal((await run({ content: lock, filename: "Gemfile.lock" })).isError ?? true, true);
+  osvDown = true;
+  try {
+    const down = await run({ content: lock, filename: "package-lock.json" });
+    assert.equal(down.isError, true);
+    assert.match(down.content[0].text, /lookup_failed/);
+  } finally {
+    osvDown = false;
+  }
 });

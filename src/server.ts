@@ -5,6 +5,7 @@ import { architectureFindings, fetchPublicBotHints } from "./review.js";
 import { looksLikeIac, ScanInputError } from "./iac/parse.js";
 import { filterFindings, scanIac, summarize } from "./iac/scan.js";
 import { registerConsultation } from "./application/tools.js";
+import { lockfileNames, lookupCves, parseLockfile } from "./cves.js";
 import { presentReview } from "./review-edits.js";
 import { savedTargetSchema, withSavedReview } from "./saved-review.js";
 import { VERSION } from "./version.js";
@@ -231,6 +232,66 @@ export function createServer(remote = false) {
         }
       },
     );
+
+  server.registerTool(
+    "scan_dependencies",
+    {
+      title: "Scan dependencies for known CVEs",
+      description:
+        "Check the exact package versions in one lockfile against OSV.dev and report known CVEs as CVE001 with severity and fixed versions. Accepts package-lock.json, pnpm-lock.yaml, yarn.lock, composer.lock, requirements.txt (exact == pins) or go.sum. Sends ecosystem, package name and version to api.osv.dev, never the lockfile or source. Skips npm packages not resolved from the public registry and requirements files with a custom index. Not covered: container images, OS packages, Cargo, Gemfile. A failed lookup is an error, never a clean result.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }] },
+      inputSchema: {
+        content: z.string().min(1).max(2_000_000).describe("Full text of the lockfile"),
+        filename: z.enum(lockfileNames).describe("Which lockfile this is"),
+        minSeverity: filters.minSeverity,
+        maxFindings: filters.maxFindings,
+      },
+    },
+    async ({ content, filename, minSeverity, maxFindings }) => {
+      if (!remote) {
+        const auth = await requireApiAuth();
+        if (!auth.ok) return unauthorizedContent(auth);
+      }
+      const fail = (error: string, message: string) => ({
+        isError: true,
+        content: [{ type: "text" as const, text: JSON.stringify({ error, message }) }],
+      });
+      let packages: ReturnType<typeof parseLockfile>;
+      try {
+        packages = parseLockfile(filename, filename, content);
+      } catch (error) {
+        return fail("invalid_input", `${filename} could not be parsed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (packages.length > 5000) {
+        return fail("invalid_input", `${packages.length} packages is over the hosted limit of 5000. Run skaleagents-swarm scan --cves locally.`);
+      }
+      try {
+        // Answer before the hosted request limit so a slow OSV is reported, not a bare 504.
+        const found = await lookupCves(packages, fetch, Date.now() + 15_000);
+        const visible = filterFindings(found, { minSeverity, focus: "security" });
+        return result({
+          status: "completed",
+          engineVersion: VERSION,
+          source: "osv.dev",
+          filename,
+          packagesChecked: packages.length,
+          summary: `Checked ${packages.length} packages; ${visible.length} known CVEs match the selected filters.`,
+          findings: visible.slice(0, maxFindings),
+          totals: summarize(visible),
+          totalFindings: visible.length,
+          truncated: visible.length > maxFindings,
+          limitations: [
+            "Only packages resolved from public registries are checked.",
+            "Severity comes from the advisory rating; unrated advisories show as medium.",
+            "Container images, OS packages, Cargo and Gemfile lockfiles are not covered.",
+          ],
+        });
+      } catch (error) {
+        return fail("lookup_failed", `CVE lookup failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
+  );
 
   return server;
 }
