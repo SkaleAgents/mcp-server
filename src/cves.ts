@@ -17,7 +17,7 @@ const publicNpm = /^https:\/\/registry\.(npmjs\.org|yarnpkg\.com)\//;
 
 type Entry = [ecosystem: Ecosystem, name: string, version: string];
 
-// Only registry packages are returned, so private package names are not sent to a third party.
+// npm entries must resolve to the public registry, so private package names are not sent to a third party.
 function npmLock(text: string): Entry[] {
   const lock = JSON.parse(text) as {
     packages?: Record<string, { version?: string; resolved?: string; link?: boolean }>;
@@ -87,6 +87,8 @@ function composerLock(text: string): Entry[] {
 // Exact == pins only: a range does not say which version is installed.
 function requirements(text: string): Entry[] {
   const out: Entry[] = [];
+  // A custom index may host private names, and the file does not say which ones.
+  if (/^\s*(?:-i|--index-url|--extra-index-url)\b/m.test(text)) return out;
   for (const line of text.split("\n")) {
     const m = /^([A-Za-z0-9][A-Za-z0-9_.-]*)(?:\[[^\]]*\])?\s*==\s*([A-Za-z0-9_.!+-]+)\s*(?:[;#\\]|$)/.exec(line.trim());
     if (m) out.push(["PyPI", m[1].toLowerCase().replace(/[_.]+/g, "-"), m[2]]);
@@ -96,8 +98,10 @@ function requirements(text: string): Entry[] {
 
 function goSum(text: string): Entry[] {
   const out: Entry[] = [];
+  const priv = (process.env.GOPRIVATE ?? "").split(",").map((g) => g.trim().replace(/\/\*$/, "")).filter(Boolean);
   for (const line of text.split("\n")) {
     const [name, version] = line.split(/\s+/);
+    if (priv.some((g) => name === g || name?.startsWith(`${g}/`))) continue;
     if (name && version?.startsWith("v") && !version.endsWith("/go.mod")) out.push(["Go", name, version.slice(1)]);
   }
   return out;

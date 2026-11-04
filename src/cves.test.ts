@@ -61,6 +61,17 @@ describe("collectPackages", () => {
     assert.deepEqual(collectPackages([sum]).packages.map((p) => `${p.name}@${p.version}`), ["golang.org/x/text@0.3.5"]);
   });
 
+  it("sends no names from a custom-index requirements file or GOPRIVATE modules", () => {
+    const req = write("requirements-private.txt", "--extra-index-url https://pypi.corp.example/simple\ncorp-lib==1.0.0\n");
+    const sum = write("go.sum", "corp.example/x/y v1.0.0 h1:a\ngolang.org/x/text v0.3.5 h1:a\n");
+    process.env.GOPRIVATE = "corp.example/*";
+    try {
+      assert.deepEqual(collectPackages([req, sum]).packages.map((p) => p.name), ["golang.org/x/text"]);
+    } finally {
+      delete process.env.GOPRIVATE;
+    }
+  });
+
   it("warns on a malformed lockfile and ignores other files", () => {
     const bad = write("package-lock.json", "{nope");
     const other = write("main.tf", "x");
