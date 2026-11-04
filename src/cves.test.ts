@@ -64,11 +64,13 @@ describe("collectPackages", () => {
   it("sends no names from a custom-index requirements file or GOPRIVATE modules", () => {
     const req = write("requirements-private.txt", "--extra-index-url https://pypi.corp.example/simple\ncorp-lib==1.0.0\n");
     const sum = write("go.sum", "corp.example/x/y v1.0.0 h1:a\ngolang.org/x/text v0.3.5 h1:a\n");
-    process.env.GOPRIVATE = "corp.example/*";
+    process.env.GOPRIVATE = "*.example,other.io/priv";
     try {
       assert.deepEqual(collectPackages([req, sum]).packages.map((p) => p.name), ["golang.org/x/text"]);
     } finally {
       delete process.env.GOPRIVATE;
+      const findLinks = write("requirements-links.txt", "-f https://wheels.corp.example\ncorp-lib==1.0.0\n-ihttps://x.example/simple\n");
+      assert.equal(collectPackages([findLinks]).packages.length, 0);
     }
   });
 

@@ -88,7 +88,7 @@ function composerLock(text: string): Entry[] {
 function requirements(text: string): Entry[] {
   const out: Entry[] = [];
   // A custom index may host private names, and the file does not say which ones.
-  if (/^\s*(?:-i|--index-url|--extra-index-url)\b/m.test(text)) return out;
+  if (process.env.PIP_INDEX_URL || process.env.PIP_EXTRA_INDEX_URL || /^\s*(?:-i|--index-url|--extra-index-url|-f|--find-links)/m.test(text)) return out;
   for (const line of text.split("\n")) {
     const m = /^([A-Za-z0-9][A-Za-z0-9_.-]*)(?:\[[^\]]*\])?\s*==\s*([A-Za-z0-9_.!+-]+)\s*(?:[;#\\]|$)/.exec(line.trim());
     if (m) out.push(["PyPI", m[1].toLowerCase().replace(/[_.]+/g, "-"), m[2]]);
@@ -96,12 +96,20 @@ function requirements(text: string): Entry[] {
   return out;
 }
 
+// Go semantics: a pattern of N slash elements is glob-matched against the first N elements of the module path.
+function goPrefixMatch(pattern: string, path: string) {
+  const want = pattern.split("/");
+  const have = path.split("/");
+  if (have.length < want.length) return false;
+  return want.every((w, i) => new RegExp(`^${w.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*")}$`).test(have[i]));
+}
+
 function goSum(text: string): Entry[] {
   const out: Entry[] = [];
-  const priv = (process.env.GOPRIVATE ?? "").split(",").map((g) => g.trim().replace(/\/\*$/, "")).filter(Boolean);
+  const priv = [process.env.GOPRIVATE, process.env.GONOPROXY, process.env.GONOSUMDB].flatMap((v) => (v ?? "").split(",")).map((g) => g.trim()).filter(Boolean);
   for (const line of text.split("\n")) {
     const [name, version] = line.split(/\s+/);
-    if (priv.some((g) => name === g || name?.startsWith(`${g}/`))) continue;
+    if (name && priv.some((g) => goPrefixMatch(g, name))) continue;
     if (name && version?.startsWith("v") && !version.endsWith("/go.mod")) out.push(["Go", name, version.slice(1)]);
   }
   return out;
