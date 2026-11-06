@@ -2492,6 +2492,10 @@ describe("hostile input", () => {
     ["unclosed block comments in an HCL string", "terraform", `resource "a" "b" { x = "${"/* ".repeat(size / 3)}" }`],
     ["unclosed Helm comments", "helm", "{{ /* ".repeat(size / 7)],
     ["repeated download words in a package script", "package", `{"name":"x","scripts":{"a":"${"curl ".repeat(size / 5)}"}}`],
+    ["a long run of word characters in instance user data", "terraform", `resource "aws_instance" "a" { user_data = "${"a".repeat(size)}" }`],
+    ["repeated secret words in instance user data", "terraform", `resource "aws_instance" "a" { user_data = "${"password ".repeat(size / 9)}" }`],
+    ["a long run of URL scheme characters in a container env value", "kubernetes", `apiVersion: apps/v1\nkind: Deployment\nmetadata: { name: a }\nspec:\n  template:\n    spec:\n      containers:\n        - name: a\n          env:\n            - name: U\n              value: "${"a".repeat(size)}"\n`],
+    ["a long expression-like run in a workflow script", "github", `on: push\njobs:\n  a:\n    steps:\n      - run: "${"\${{ github.event.issue.titl ".repeat(size / 30)}"\n`],
     ["unclosed template parameters", "cloudformation", JSON.stringify({
       Parameters: { P: { Type: "String", Default: "x" } },
       Resources: { B: { Type: "AWS::S3::Bucket", Properties: { BucketName: { "Fn::Sub": "${".repeat(size / 3) } } } },
@@ -2530,9 +2534,11 @@ jobs:
       - env:
           TITLE: \${{ github.event.pull_request.title }}
         run: echo "$TITLE"
-      - run: echo "\${{ github.sha }}" # \${{ github.event.issue.title }}
+      - run: echo "\${{ github.sha }}"
 `;
     assert.equal(ids(safe).includes("GH006"), false);
+    // GitHub expands the expression inside a comment too, and a newline in the value ends the comment.
+    assert.ok(ids(`${safe}      - run: |\n          echo ok\n          # \${{ github.event.issue.title }}\n`).includes("GH006"));
   });
 
   it("DF006 flags EXPOSE 22 in any position and ignores other ports and comments", () => {

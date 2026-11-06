@@ -1341,10 +1341,9 @@ function workflowChecksOutHead(jobs: unknown): boolean {
 const untrustedExpression =
   /\$\{\{\s*github\.(?:event\.(?:issue\.(?:title|body)|pull_request\.(?:title|body|head\.(?:ref|label))|(?:comment|review|review_comment)\.body|head_commit\.message|commits\[[^\]]*\]\.message)|head_ref)\s*\}\}/;
 
+// GitHub expands expressions before the shell parses the script, so one inside a shell comment is just as dangerous (a newline in the value ends the comment).
 function runIsInjectable(script: string): boolean {
-  return script
-    .split(/\n/)
-    .some((line) => untrustedExpression.test(line.replace(/(^|\s)#[^\n]*$/, "")));
+  return untrustedExpression.test(script);
 }
 
 function runPrintsSecret(script: string): boolean {
