@@ -1298,6 +1298,18 @@ function parseDockerfile(content: string): ParsedIac {
       locate: () => lineLocation(instruction.line, "env"),
     });
   });
+  instructions.forEach((instruction, index) => {
+    const exposed = instruction.text.match(/^EXPOSE\b\s*([\s\S]*)$/i);
+    if (!exposed) return;
+    resources.push({
+      id: `dockerfile.expose.${index + 1}`,
+      type: "dockerfile:expose",
+      value: {
+        ssh: exposed[1].split(/\s+/).some((port) => /^22(?:\/(?:tcp|udp))?$/i.test(port)),
+      },
+      locate: () => lineLocation(instruction.line, "expose"),
+    });
+  });
   return {
     format: "dockerfile",
     resources,
@@ -1323,6 +1335,16 @@ function workflowChecksOutHead(jobs: unknown): boolean {
     }
   }
   return false;
+}
+
+// Contexts an outside contributor controls. Expanding one inside a run script lets them inject shell commands.
+const untrustedExpression =
+  /\$\{\{\s*github\.(?:event\.(?:issue\.(?:title|body)|pull_request\.(?:title|body|head\.(?:ref|label))|(?:comment|review|review_comment)\.body|head_commit\.message|commits\[[^\]]*\]\.message)|head_ref)\s*\}\}/;
+
+function runIsInjectable(script: string): boolean {
+  return script
+    .split(/\n/)
+    .some((line) => untrustedExpression.test(line.replace(/(^|\s)#[^\n]*$/, "")));
 }
 
 function runPrintsSecret(script: string): boolean {
@@ -1448,7 +1470,10 @@ function parseGithubWorkflow(content: string): ParsedIac {
         resources.push({
           id: `jobs.${jobName}.steps.${index}.run`,
           type: "github:run",
-          value: { printsSecret: runPrintsSecret(run) },
+          value: {
+            printsSecret: runPrintsSecret(run),
+            injectable: runIsInjectable(run),
+          },
           locate: () => position(["jobs", jobName, "steps", index, "run"]),
         });
       });

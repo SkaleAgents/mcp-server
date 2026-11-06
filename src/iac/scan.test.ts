@@ -2509,3 +2509,81 @@ describe("hostile input", () => {
     });
   }
 });
+
+describe("gap rules found by scanning a deliberately flawed repository", () => {
+  const ids = (text: string, format?: "terraform" | "kubernetes") =>
+    scanIac(text, format ? { format } : {}).findings.map((finding) => finding.ruleId);
+
+  it("GH006 flags untrusted input expanded in a run script, not when passed through env", () => {
+    const unsafe = `on: pull_request_target
+jobs:
+  t:
+    steps:
+      - run: echo "\${{ github.event.pull_request.title }}"
+`;
+    assert.ok(ids(unsafe).includes("GH006"));
+    assert.ok(ids(unsafe.replace("github.event.pull_request.title", "github.head_ref")).includes("GH006"));
+    const safe = `on: pull_request
+jobs:
+  t:
+    steps:
+      - env:
+          TITLE: \${{ github.event.pull_request.title }}
+        run: echo "$TITLE"
+      - run: echo "\${{ github.sha }}" # \${{ github.event.issue.title }}
+`;
+    assert.equal(ids(safe).includes("GH006"), false);
+  });
+
+  it("DF006 flags EXPOSE 22 in any position and ignores other ports and comments", () => {
+    const base = "FROM node:20.11\nUSER node\n";
+    assert.ok(ids(`${base}EXPOSE 8080 22\n`).includes("DF006"));
+    assert.ok(ids(`${base}EXPOSE 22/tcp\n`).includes("DF006"));
+    assert.equal(ids(`${base}EXPOSE 8080 2222\n# EXPOSE 22\n`).includes("DF006"), false);
+  });
+
+  it("VM002 flags a literal secret in user_data and clears a fetch at boot", () => {
+    const tf = (userData: string) => `resource "aws_instance" "app" {
+  ami = "ami-1"
+  instance_type = "t3.micro"
+  user_data = "${userData}"
+}`;
+    assert.ok(ids(tf("export DB_PASSWORD=password123"), "terraform").includes("VM002"));
+    assert.equal(ids(tf("aws ssm get-parameter --name /app/db"), "terraform").includes("VM002"), false);
+    assert.equal(ids(tf("export DB_PASSWORD=$SSM_VALUE"), "terraform").includes("VM002"), false);
+  });
+
+  it("DB005 flags skip_final_snapshot = true and clears false", () => {
+    const tf = (value: boolean) => `resource "aws_db_instance" "main" {
+  engine = "postgres"
+  skip_final_snapshot = ${value}
+}`;
+    assert.ok(ids(tf(true), "terraform").includes("DB005"));
+    assert.equal(ids(tf(false), "terraform").includes("DB005"), false);
+  });
+
+  it("K8S014 flags a URL with a literal password in container env, not a reference or a plain URL", () => {
+    const deployment = (value: string) => `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: api }
+  template:
+    metadata:
+      labels: { app: api }
+    spec:
+      containers:
+        - name: api
+          image: acme/api:1.2.3
+          env:
+            - name: DATABASE_URL
+              value: "${value}"
+`;
+    assert.ok(ids(deployment("postgres://admin:password123@db:5432/app")).includes("K8S014"));
+    assert.equal(ids(deployment("postgres://admin:$(DB_PASSWORD)@db:5432/app")).includes("K8S014"), false);
+    assert.equal(ids(deployment("https://api.example.com/v1")).includes("K8S014"), false);
+  });
+});
