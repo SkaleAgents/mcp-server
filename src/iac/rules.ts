@@ -248,6 +248,49 @@ export const rules: Record<string, Rule> = {
     remediation:
       "Scope the role to the required API groups, resource names, and verbs.",
   },
+  GH006: {
+    category: "security",
+    severity: "high",
+    title: "Workflow script uses untrusted input",
+    detail:
+      "A run script expands an issue, pull request, comment or branch-name expression that an outside contributor controls.",
+    remediation:
+      "Pass the value through an env variable and quote it in the script (\"$TITLE\"). Never expand it directly inside the script text.",
+  },
+  DF006: {
+    category: "security",
+    severity: "medium",
+    title: "Dockerfile exposes SSH",
+    detail: "An EXPOSE instruction opens port 22.",
+    remediation:
+      "Remove port 22. Use the platform's exec or session tooling instead of running sshd in the container.",
+  },
+  VM002: {
+    category: "security",
+    severity: "high",
+    title: "Secret in instance user data",
+    detail:
+      "The instance user data assigns a literal value to a password, token or key. User data is readable from the instance metadata and the console.",
+    remediation:
+      "Have the instance fetch the secret at boot from Secrets Manager or SSM Parameter Store using its IAM role.",
+  },
+  DB005: {
+    category: "reliability",
+    severity: "medium",
+    title: "Database skips its final snapshot",
+    detail: "skip_final_snapshot is true, so deleting the database leaves no restore point.",
+    remediation:
+      "Set skip_final_snapshot to false with a final_snapshot_identifier, and enable deletion protection.",
+  },
+  K8S014: {
+    category: "security",
+    severity: "high",
+    title: "Credentials in a container URL",
+    detail:
+      "A container env value is a URL with a literal user and password in it.",
+    remediation:
+      "Keep the URL in a Kubernetes Secret and reference it with valueFrom.secretKeyRef. Rotate the exposed password.",
+  },
   DF001: {
     category: "security",
     severity: "high",
@@ -648,6 +691,8 @@ function checkDockerfile(resource: Resource, check: Check): void {
     check("DF004", resource.value.secret === true, ["copy"]);
   else if (resource.type === "dockerfile:env")
     check("DF005", resource.value.literal === true, ["env"]);
+  else if (resource.type === "dockerfile:expose")
+    check("DF006", resource.value.ssh === true, ["expose"]);
 }
 
 function checkGithub(resource: Resource, check: Check): void {
@@ -662,8 +707,10 @@ function checkGithub(resource: Resource, check: Check): void {
     check("GH002", resource.value.broad === true, ["permissions"]);
   else if (resource.type === "github:action")
     check("GH003", resource.value.floating === true, ["uses"]);
-  else if (resource.type === "github:run")
+  else if (resource.type === "github:run") {
     check("GH004", resource.value.printsSecret === true, ["run"]);
+    check("GH006", resource.value.injectable === true, ["run"]);
+  }
   else if (resource.type === "github:env")
     check("GH005", resource.value.literal === true, ["env"]);
 }
@@ -1447,6 +1494,11 @@ function checkCloud(
       property("multi_az", "MultiAZ") === false,
       path("multi_az", "MultiAZ"),
     );
+    check(
+      "DB005",
+      property("skip_final_snapshot", "SkipFinalSnapshot") === true,
+      path("skip_final_snapshot", "SkipFinalSnapshot"),
+    );
   }
   if (["aws_ebs_volume", "AWS::EC2::Volume"].includes(resource.type))
     check(
@@ -1466,7 +1518,28 @@ function checkCloud(
         (tokens === undefined || tokens === "optional"),
       path("metadata_options", "MetadataOptions"),
     );
+    const userData = property("user_data", "UserData");
+    check(
+      "VM002",
+      typeof userData === "string" && userDataAssignsSecret(userData),
+      path("user_data", "UserData"),
+    );
   }
+}
+
+// shortcut: only a literal string is inspected, so Fn::Base64 or templatefile() user data is not checked; extend when a real template is missed.
+function userDataAssignsSecret(text: string): boolean {
+  const assignment =
+    /[A-Za-z0-9_]*(?:password|passwd|secret|token|api_?key)[A-Za-z0-9_]*\s*[=:]\s*["']?([^\s"'$]\S*)/gi;
+  return [...text.matchAll(assignment)].some(
+    (match) => !match[1].startsWith("{{") && !match[1].startsWith("<"),
+  );
+}
+
+function urlHasLiteralPassword(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const match = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:([^\s@/]+)@/i.exec(value);
+  return Boolean(match) && !/^(\$|\{\{|<)/.test(match![1]);
 }
 
 function checkKubernetes(
@@ -1582,6 +1655,14 @@ function checkKubernetes(
           ["ALL", "SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE"].includes(String(v)),
         ),
         [...at, "securityContext", "capabilities"],
+      );
+      array(container.env).forEach((entry, envIndex) =>
+        check("K8S014", urlHasLiteralPassword(object(entry).value), [
+          ...at,
+          "env",
+          envIndex,
+          "value",
+        ]),
       );
       const image = typeof container.image === "string" ? container.image : "";
       check(
