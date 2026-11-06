@@ -1528,22 +1528,25 @@ function checkCloud(
 }
 
 // shortcut: only a literal string is inspected, so Fn::Base64 or templatefile() user data is not checked; extend when a real template is missed.
-// Every quantifier is bounded so a 500,000-character value cannot make the scan quadratic.
+// Quantifiers are bounded and the scan is linear, so a 500,000-character value cannot make it quadratic.
 function userDataAssignsSecret(text: string): boolean {
   const assignment =
-    /(?:password|passwd|secret|token|api_?key)\w{0,64}\s{0,16}[=:]\s{0,16}["']?([^\s"'$])/gi;
+    /(?:password|passwd|secret|token|api_?key)\w{0,64}\s*[=:]\s*["']?([^\s"'$]\S{0,63})/gi;
   return [...text.matchAll(assignment)].some(
-    (match) => !match[1].startsWith("<") && !match[1].startsWith("{"),
+    (match) => !match[1].startsWith("{{") && !/^<[^>]*>$/.test(match[1]),
   );
 }
 
+// Checks the userinfo after each "://" with a bounded, anchored match, so the whole value is covered and the scan stays linear.
 function urlHasLiteralPassword(value: unknown): boolean {
-  if (typeof value !== "string" || !value.includes("://")) return false;
-  const match =
-    /[a-z][a-z0-9+.-]{0,31}:\/\/[^\s:@/]{1,256}:([^\s@/]{1,256})@/i.exec(
-      value.slice(0, 4096),
-    );
-  return Boolean(match) && !/^(\$|\{\{|<)/.test(match![1]);
+  if (typeof value !== "string") return false;
+  const userinfo = /^:\/\/[^\s:@/]{1,256}:([^\s@/]{1,256})@/;
+  for (let at = value.indexOf("://"); at !== -1; at = value.indexOf("://", at + 3)) {
+    if (!/[a-z0-9+.-]/i.test(value[at - 1] ?? "")) continue;
+    const match = userinfo.exec(value.slice(at, at + 520));
+    if (match && !/^(\$|\{\{|<)/.test(match[1])) return true;
+  }
+  return false;
 }
 
 function checkKubernetes(
