@@ -2496,6 +2496,7 @@ describe("hostile input", () => {
     ["repeated secret words in instance user data", "terraform", `resource "aws_instance" "a" { user_data = "${"password ".repeat(size / 9)}" }`],
     ["a long run of URL scheme characters in a container env value", "kubernetes", `apiVersion: apps/v1\nkind: Deployment\nmetadata: { name: a }\nspec:\n  template:\n    spec:\n      containers:\n        - name: a\n          env:\n            - name: U\n              value: "${"a".repeat(size)}"\n`],
     ["a long expression-like run in a workflow script", "github", `on: push\njobs:\n  a:\n    steps:\n      - run: "${"\${{ github.event.issue.titl ".repeat(size / 30)}"\n`],
+    ["repeated URL separators in a container env value", "kubernetes", `apiVersion: apps/v1\nkind: Deployment\nmetadata: { name: a }\nspec:\n  template:\n    spec:\n      containers:\n        - name: a\n          env:\n            - name: U\n              value: "${"a://".repeat(size / 4)}"\n`],
     ["unclosed template parameters", "cloudformation", JSON.stringify({
       Parameters: { P: { Type: "String", Default: "x" } },
       Resources: { B: { Type: "AWS::S3::Bucket", Properties: { BucketName: { "Fn::Sub": "${".repeat(size / 3) } } } },
@@ -2557,6 +2558,9 @@ jobs:
     assert.ok(ids(tf("export DB_PASSWORD=password123"), "terraform").includes("VM002"));
     assert.equal(ids(tf("aws ssm get-parameter --name /app/db"), "terraform").includes("VM002"), false);
     assert.equal(ids(tf("export DB_PASSWORD=$SSM_VALUE"), "terraform").includes("VM002"), false);
+    assert.equal(ids(tf("DB_PASSWORD={{ vault }}"), "terraform").includes("VM002"), false);
+    // Wide spacing and values that start with a brace are still literal secrets.
+    assert.ok(ids(tf(`export DB_PASSWORD${" ".repeat(40)}= {abc123`), "terraform").includes("VM002"));
   });
 
   it("DB005 flags skip_final_snapshot = true and clears false", () => {
@@ -2591,5 +2595,7 @@ spec:
     assert.ok(ids(deployment("postgres://admin:password123@db:5432/app")).includes("K8S014"));
     assert.equal(ids(deployment("postgres://admin:$(DB_PASSWORD)@db:5432/app")).includes("K8S014"), false);
     assert.equal(ids(deployment("https://api.example.com/v1")).includes("K8S014"), false);
+    // The credential may come after other text, and the value may be long.
+    assert.ok(ids(deployment(`${"x".repeat(5000)} postgres://admin:password123@db/app`)).includes("K8S014"));
   });
 });
