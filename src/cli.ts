@@ -4,6 +4,7 @@ import { basename, dirname, join, relative } from "node:path";
 import { scanIac, severityRank } from "./iac/scan.js";
 import { collectPackages, lookupCves } from "./cves.js";
 import { scanSecrets } from "./secrets.js";
+import { readRules, ruleFindings, RULES_FILE } from "./house-rules.js";
 import type { Finding, FindingSeverity } from "./review.js";
 
 const usage = `Usage: skaleagents-swarm scan [paths...] [options]
@@ -18,6 +19,8 @@ Scans IaC, CI and package files, and any file for committed secrets, locally. No
   --cves                 Check lockfile packages for known CVEs. Sends package names and versions (no source) to api.osv.dev
   --json                 Print JSON instead of text
   --hook                 Agent stop hook mode for Claude Code and Cursor (implies --changed)
+
+A .skaleagents-rules.json at the repo root adds your own Terraform rules and applies automatically.
 
 Suppress a finding with a comment on its line or the line above:
   # skaleagents-ignore DATA001 public asset bucket`;
@@ -199,8 +202,16 @@ export async function runScan(argv: string[]): Promise<number> {
   const scanned = scanFiles(unique.filter((file) => candidate.test(file) && !skippedFiles.test(file)), minSeverity);
   const secrets = scanSecrets(unique);
   scanned.findings = scanned.findings.concat(secrets.findings);
-  const suppressed = scanned.suppressed + secrets.suppressed;
-  warnings.push(...scanned.warnings);
+  let rules: ReturnType<typeof ruleFindings>;
+  try {
+    rules = ruleFindings(unique, readRules());
+  } catch (error) {
+    console.error(`SkaleAgents: ${error instanceof Error ? error.message : String(error)}`);
+    return 2;
+  }
+  scanned.findings = scanned.findings.concat(rules.findings);
+  const suppressed = scanned.suppressed + secrets.suppressed + rules.suppressed;
+  warnings.push(...scanned.warnings, ...rules.warnings);
   if (cves) {
     const found = collectPackages(unique);
     warnings.push(...found.warnings);
