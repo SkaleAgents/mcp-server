@@ -23,7 +23,6 @@ export type HouseRule =
 const path = /^[A-Za-z_][A-Za-z0-9_-]{0,63}(?:\.[A-Za-z_][A-Za-z0-9_-]{0,63}){0,7}$/;
 const tag = /^[\w.:/+=@-]{1,128}$/;
 const MAX_RULES = 25;
-const MAX_TOTAL = 500;
 
 /** Reads the committed rules file. A malformed file is an error: a gate that silently stops checking is worse than a loud one. */
 export function readRules(file = RULES_FILE): HouseRule[] {
@@ -118,11 +117,6 @@ export function ruleFindings(files: string[], rules: HouseRule[]): { findings: (
     const result = applySuppressions(found, text);
     suppressed += result.suppressed;
     out.push(...result.kept.map((finding) => ({ ...finding, file: relative(".", file) })));
-  }
-  // Suppressions are applied first, so a flood of ignored findings cannot push a real one past the cap.
-  if (out.length > MAX_TOTAL) {
-    warnings.push(`${out.length - MAX_TOTAL} house rule findings beyond the first ${MAX_TOTAL} are not shown`);
-    out.length = MAX_TOTAL;
   }
   if (unknown) warnings.push(`${unknown} house rule check${unknown === 1 ? "" : "s"} skipped: the value is computed at apply time`);
   return { findings: out, suppressed, warnings };

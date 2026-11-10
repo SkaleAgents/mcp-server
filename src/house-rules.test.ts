@@ -61,13 +61,11 @@ describe("house rules", () => {
   });
 });
 
-describe("caps", () => {
-  it("applies suppressions before the cap so ignored findings cannot hide real ones", () => {
+describe("no cap", () => {
+  it("reports every failing resource so the gate never sees a truncated list", () => {
     const rule: HouseRule = { kind: "require_tag", resourceType: "aws_s3_bucket", attribute: "owner", severity: "low" };
-    const ignored = Array.from({ length: 600 }, (_, i) => `# skaleagents-ignore ${ruleId(rule)}\nresource "aws_s3_bucket" "i${i}" {}\n`).join("");
-    const result = ruleFindings([write("many.tf", `${ignored}resource "aws_s3_bucket" "real" {}\n`)], [rule]);
-    assert.deepEqual(result.findings.map((f) => f.resource), ["aws_s3_bucket.real"]);
-    assert.equal(result.suppressed, 600);
+    const many = Array.from({ length: 600 }, (_, i) => `resource "aws_s3_bucket" "b${i}" {}\n`).join("");
+    assert.equal(ruleFindings([write("many.tf", many)], [rule]).findings.length, 600);
   });
 });
 
