@@ -21,7 +21,7 @@ inputs:
     default: ${{ github.token }}
   version:
     description: "@skaleagents/swarm version to run."
-    default: "0.11.0"
+    default: "0.11.1"
 runs:
   using: composite
   steps:

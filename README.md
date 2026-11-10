@@ -21,7 +21,7 @@ the MCP tool for a structured review.
 
 ## Scan locally, in agent hooks, and in pull requests
 
-`npx -y @skaleagents/swarm scan [paths...]` scans IaC, CI, Dockerfile and package files on your machine. It needs no account and sends nothing over the network unless you pass `--cves`. Use `--changed` for files changed against HEAD, `--fail-on high` to exit 1, and `--json` for machine output.
+`npx -y @skaleagents/swarm scan [paths...]` scans IaC, CI, Dockerfile and package files on your machine. It needs no account and sends nothing over the network unless you pass `--cves`. Use `--changed` for files changed against HEAD, `--fail-on high` to exit 1, and `--json` for machine output. With `--fail-on`, a file that cannot be read (invalid syntax, over the size or nesting limit) or a path that does not exist exits 2 instead of passing, the same way a failed CVE lookup does.
 
 Adopt it on an existing repo: `npx @skaleagents/swarm scan --write-baseline .skaleagents-baseline.json`, commit the file, and later scans show only new findings. The Action reads the baseline from the PR's base commit, so a PR cannot hide findings by editing it. Findings match on rule, file and resource, not line number.
 
@@ -48,7 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.11.0 scan --cves --fail-on high
+      - run: npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.11.1 scan --cves --fail-on high
 ```
 
 Suppress an intended setting with a comment on the flagged line or the line above: `# skaleagents-ignore DATA001 public asset bucket`.
@@ -63,7 +63,7 @@ Suppress an intended setting with a comment on the flagged line or the line abov
 **Cursor.** Add `.cursor/hooks.json`:
 
 ```json
-{ "version": 1, "hooks": { "stop": [{ "command": "npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.11.0 scan --hook" }] } }
+{ "version": 1, "hooks": { "stop": [{ "command": "npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.11.1 scan --hook" }] } }
 ```
 
 **GitHub Action.** It posts one PR comment and fails on `critical` by default:
@@ -77,7 +77,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - uses: SkaleAgents/mcp-server@v0.11.0
+      - uses: SkaleAgents/mcp-server@v0.11.1
         with: { fail-on: high }
 ```
 

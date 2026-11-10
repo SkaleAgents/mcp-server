@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, it } from "node:test";
-import { baselineKey, readBaseline, scanFiles } from "./cli.js";
+import { describe, it, mock } from "node:test";
+import { baselineKey, readBaseline, runScan, scanFiles } from "./cli.js";
 import { scanIac } from "./iac/scan.js";
 
 const bucket = 'resource "aws_s3_bucket" "b" {\n  acl = "public-read"\n}\n';
@@ -60,5 +60,40 @@ describe("baseline", () => {
     assert.ok(readBaseline(join(dir, "b.json")).has(key));
     writeFileSync(join(dir, "bad.json"), '{"findings":[1]}');
     assert.throws(() => readBaseline(join(dir, "bad.json")), /not a SkaleAgents baseline/);
+  });
+});
+
+describe("scan exit codes", () => {
+  async function run(files: Record<string, string>, args: string[], paths?: string[]) {
+    const dir = mkdtempSync(join(tmpdir(), "sa-gate-"));
+    for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content);
+    const out = mock.method(console, "log", () => {});
+    const err = mock.method(console, "error", () => {});
+    try {
+      return await runScan([...args, ...(paths ?? [dir])].map((arg) => (arg === "{dir}" ? dir : arg)));
+    } finally {
+      out.mock.restore();
+      err.mock.restore();
+    }
+  }
+
+  it("fails a gate on a file it could not read, and only warns without --fail-on", async () => {
+    const broken = { "broken.tf": 'resource "aws_s3_bucket" "a" {\n  acl = "public-read"\n' };
+    assert.equal(await run(broken, ["--fail-on", "high"]), 2);
+    assert.equal(await run(broken, []), 0);
+  });
+
+  it("fails a gate on a path that does not exist, with or without --fail-on", async () => {
+    assert.equal(await run({}, ["--fail-on", "high"], ["/nonexistent/qa/main.tf"]), 2);
+    assert.equal(await run({}, [], ["/nonexistent/qa/main.tf"]), 2);
+  });
+
+  it("does not treat an empty file as unreadable", async () => {
+    assert.equal(await run({ "empty.tf": "  \n" }, ["--fail-on", "high"]), 0);
+  });
+
+  it("still exits 1 on a finding and 0 when clean", async () => {
+    assert.equal(await run({ "main.tf": bucket }, ["--fail-on", "high"]), 1);
+    assert.equal(await run({ "main.tf": 'resource "aws_s3_bucket" "b" {\n  bucket = "x"\n  versioning {\n    enabled = true\n  }\n}\n' }, ["--fail-on", "critical"]), 0);
   });
 });
