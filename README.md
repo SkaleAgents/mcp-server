@@ -25,6 +25,18 @@ the MCP tool for a structured review.
 
 Adopt it on an existing repo: `npx @skaleagents/swarm scan --write-baseline .skaleagents-baseline.json`, commit the file, and later scans show only new findings. The Action reads the baseline from the PR's base commit, so a PR cannot hide findings by editing it. Findings match on rule, file and resource, not line number.
 
+**Your own rules.** Commit a `.skaleagents-rules.json` at the repo root and every scan, agent hook and Action run checks it. The agent gets your conventions before it stops, not after review. It applies automatically and needs no account:
+
+```json
+{ "rules": [
+  { "kind": "require_tag", "resourceType": "aws_s3_bucket", "attribute": "owner", "severity": "medium" },
+  { "kind": "require_attribute", "resourceType": "aws_db_instance", "attribute": "deletion_protection", "severity": "high" },
+  { "kind": "forbid_value", "resourceType": "aws_s3_bucket", "attribute": "acl", "value": "public-read", "severity": "high" }
+] }
+```
+
+Rules check Terraform `.tf` files. `attribute` is a dotted path such as `versioning.enabled`; a value computed from a variable or expression is skipped with a warning, not flagged. At most 25 rules. A malformed file exits 2 instead of silently skipping the check. Findings are `HOUSE001`; suppress one with `# skaleagents-ignore HOUSE001 reason`.
+
 `scan` also looks for committed secrets in any file it reads (AWS, GitHub, Slack, Stripe, Google, npm and Anthropic keys, private keys) as `SECRET001`, critical. The value is never printed. Git-ignored files such as a local `.env` are skipped. Rotate the key; only suppress a documented example.
 
 `scan --cves` also checks the exact package versions in lockfiles against [OSV.dev](https://osv.dev) (GitHub Advisories, PyPI, Go, Packagist) and reports known CVEs as `CVE001`. It reads `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `composer.lock`, `requirements*.txt` (exact `==` pins only) and `go.sum`. It sends package names and versions to `api.osv.dev`, never source, and skips npm packages that do not come from the public registry, `requirements` files that set a custom index, and Go modules matching `GOPRIVATE`, `GONOPROXY` or `GONOSUMDB` (read from the environment, not from `go env` files). Set `PIP_INDEX_URL` or `PIP_EXTRA_INDEX_URL` to skip all requirements files. These filters are best effort. Private names in pnpm and yarn custom registries, and in Composer private repositories, are not detected and would be sent; do not use `--cves` on those repos. If the lookup fails, the scan exits 2 rather than reporting a clean result. Severity comes from the advisory rating, and unrated advisories show as `medium`. Accept a known CVE with the baseline file. In the Action, set `cves: true`; it then checks every tracked lockfile, not only changed ones. The Action only runs on pull requests, so also run a schedule to catch CVEs published after merge:
@@ -41,7 +53,7 @@ jobs:
 
 Suppress an intended setting with a comment on the flagged line or the line above: `# skaleagents-ignore DATA001 public asset bucket`.
 
-**Claude Code plugin.** It adds a stop hook that scans changed files and asks the agent to fix `high` and `critical` findings, plus a skill and the hosted MCP server:
+**Claude Code plugin.** It adds a stop hook that scans changed files, including your `.skaleagents-rules.json`, and asks the agent to fix `high` and `critical` findings, plus a skill and the hosted MCP server:
 
 ```
 /plugin marketplace add SkaleAgents/mcp-server
