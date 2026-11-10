@@ -13,7 +13,7 @@ Scans IaC, CI and package files, and any file for committed secrets, locally. No
 
   --changed              Scan files changed against HEAD plus untracked files
   --min-severity <s>     Hide findings below info|low|medium|high|critical (default low)
-  --fail-on <s>          Exit 1 when a finding is at or above this severity
+  --fail-on <s>          Exit 1 when a finding is at or above this severity, and 2 when a file could not be checked
   --baseline <file>      Hide findings already listed in this baseline file (.skaleagents-baseline.json is used automatically)
   --write-baseline <file>  Write current findings to a baseline file and exit 0
   --cves                 Check lockfile packages for known CVEs. Sends package names and versions (no source) to api.osv.dev
@@ -95,8 +95,10 @@ export function scanFiles(files: string[], minSeverity: FindingSeverity = "low")
   for (const file of files) groups.set(dirname(file), [...(groups.get(dirname(file)) ?? []), file]);
   const findings: FileFinding[] = [];
   const warnings: string[] = [];
+  const unchecked: string[] = []; // Inputs the scanner could not read, so a gate must not treat them as clean.
   let suppressed = 0;
   for (const [dir, group] of groups) {
+    if (group.every((file) => !readFileSync(file, "utf8").trim())) continue; // Nothing to check is not a failure.
     const byName = new Map(group.map((file) => [basename(file), file]));
     const content = group
       .map((file) => `----- skaleagents-file: ${basename(file)} -----\n${readFileSync(file, "utf8")}`)
@@ -105,7 +107,9 @@ export function scanFiles(files: string[], minSeverity: FindingSeverity = "low")
     try {
       result = scanIac(content, { minSeverity, maxFindings: 1000 });
     } catch (error) {
-      warnings.push(`${dir}: ${error instanceof Error ? error.message : String(error)}`);
+      const warning = `${dir}: ${error instanceof Error ? error.message : String(error)}`;
+      warnings.push(warning);
+      unchecked.push(warning);
       continue;
     }
     suppressed += result.suppressedFindings;
@@ -117,7 +121,7 @@ export function scanFiles(files: string[], minSeverity: FindingSeverity = "low")
       findings.push({ ...finding, resource, location, file: relative(".", file) });
     }
   }
-  return { findings, suppressed, warnings };
+  return { findings, suppressed, warnings, unchecked };
 }
 
 // Names come from scanned files, so they are flattened and capped before reaching an agent or PR comment.
@@ -184,6 +188,12 @@ export async function runScan(argv: string[]): Promise<number> {
     else paths.push(arg);
   }
 
+  const missing = paths.filter((path) => !existsSync(path));
+  if (missing.length) {
+    console.error(`SkaleAgents: path not found: ${missing.map((path) => clean(path)).join(", ")}`);
+    return 2;
+  }
+
   if (hook) {
     const input = JSON.parse(readFileSync(0, "utf8") || "{}") as { stop_hook_active?: boolean; loop_count?: number };
     // One follow-up per stop, so the agent cannot loop on a finding it decides to keep.
@@ -193,6 +203,7 @@ export async function runScan(argv: string[]): Promise<number> {
 
   const warnings: string[] = [];
   const files: string[] = [];
+  const skipped = (): string[] => warnings.filter((warning) => warning.startsWith("file limit reached"));
   if (changed) {
     for (const file of changedFiles()) walk(file, files);
   }
@@ -212,6 +223,7 @@ export async function runScan(argv: string[]): Promise<number> {
   scanned.findings = scanned.findings.concat(rules.findings);
   const suppressed = scanned.suppressed + secrets.suppressed + rules.suppressed;
   warnings.push(...scanned.warnings, ...rules.warnings);
+  const unchecked = [...scanned.unchecked, ...skipped()];
   if (cves) {
     const found = collectPackages(unique);
     warnings.push(...found.warnings);
@@ -247,5 +259,11 @@ export async function runScan(argv: string[]): Promise<number> {
     console.log(formatText(findings, suppressed));
     for (const warning of warnings) console.error(`warning: ${warning}`);
   }
-  return failing.length ? 1 : 0;
+  if (failing.length) return 1;
+  // A gate that could not read part of what it guards is not green. Without --fail-on this stays a warning.
+  if (failOn && unchecked.length) {
+    console.error(`SkaleAgents: ${unchecked.length} input${unchecked.length === 1 ? "" : "s"} could not be checked, so --fail-on cannot report a pass. Fix the file or scan fewer files.`);
+    return 2;
+  }
+  return 0;
 }
