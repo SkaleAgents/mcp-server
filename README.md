@@ -35,7 +35,7 @@ Adopt it on an existing repo: `npx @skaleagents/swarm scan --write-baseline .ska
 ] }
 ```
 
-Rules check Terraform `.tf` files. `attribute` is a dotted path such as `versioning.enabled`; a value computed from a variable or expression is skipped with a warning, not flagged. At most 25 rules. A malformed file exits 2 instead of silently skipping the check. Findings are `HOUSE001`; suppress one with `# skaleagents-ignore HOUSE001 reason`.
+Rules check Terraform `.tf` files. `attribute` is a dotted path such as `versioning.enabled`; a value computed from a variable or expression is skipped with a warning, not flagged. At most 25 rules. A malformed file exits 2 instead of silently skipping the check. Each rule has its own id, like `HOUSE483920`, shown in the finding; suppress or baseline one rule with `# skaleagents-ignore HOUSE483920 reason` without hiding the others. A `forbid_value` value may use letters, digits and `. : / + = @ * - _` only. Because computed values are skipped, resolve variables and locals to literals where a rule matters.
 
 `scan` also looks for committed secrets in any file it reads (AWS, GitHub, Slack, Stripe, Google, npm and Anthropic keys, private keys) as `SECRET001`, critical. The value is never printed. Git-ignored files such as a local `.env` are skipped. Rotate the key; only suppress a documented example.
 

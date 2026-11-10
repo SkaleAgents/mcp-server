@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { extname, relative } from "node:path";
 import { applySuppressions } from "./iac/scan.js";
@@ -5,7 +6,13 @@ import { parseIac, type Resource } from "./iac/parse.js";
 import type { Finding, FindingSeverity } from "./review.js";
 
 export const RULES_FILE = ".skaleagents-rules.json";
-export const HOUSE_RULE_ID = "HOUSE001";
+const safeValue = /^[\w.:/+=@*-]{1,200}$/;
+
+/** Each rule gets its own id, so baselining or ignoring one rule on a resource never hides another. Letters then digits, to fit the ignore-comment syntax. */
+export function ruleId(rule: HouseRule): string {
+  const digest = createHash("sha1").update(JSON.stringify([rule.kind, rule.resourceType, rule.attribute, "value" in rule ? rule.value : ""])).digest();
+  return `HOUSE${String(digest.readUInt32BE(0) % 1_000_000).padStart(6, "0")}`;
+}
 
 type Base = { resourceType: string; severity: Exclude<FindingSeverity, "info"> };
 export type HouseRule =
@@ -16,7 +23,7 @@ export type HouseRule =
 const path = /^[A-Za-z_][A-Za-z0-9_-]{0,63}(?:\.[A-Za-z_][A-Za-z0-9_-]{0,63}){0,7}$/;
 const tag = /^[\w.:/+=@-]{1,128}$/;
 const MAX_RULES = 25;
-const MAX_PER_RULE = 50;
+const MAX_TOTAL = 500;
 
 /** Reads the committed rules file. A malformed file is an error: a gate that silently stops checking is worse than a loud one. */
 export function readRules(file = RULES_FILE): HouseRule[] {
@@ -31,7 +38,7 @@ export function readRules(file = RULES_FILE): HouseRule[] {
       && typeof rule.resourceType === "string" && /^[a-z][a-z0-9_]{1,63}$/.test(rule.resourceType)
       && typeof rule.attribute === "string" && (rule.kind === "require_tag" ? tag : path).test(rule.attribute)
       && ["low", "medium", "high", "critical"].includes(rule.severity as string)
-      && (rule.kind !== "forbid_value" || (typeof rule.value === "string" && rule.value.length > 0 && rule.value.length <= 200));
+      && (rule.kind !== "forbid_value" || (typeof rule.value === "string" && safeValue.test(rule.value)));
     if (!ok) throw new Error(`${file}: rule ${index + 1} is not valid`);
     return rule as unknown as HouseRule;
   });
@@ -81,7 +88,6 @@ export function ruleFindings(files: string[], rules: HouseRule[]): { findings: (
   let suppressed = 0;
   let unknown = 0;
   if (!rules.length) return { findings: out, suppressed, warnings };
-  const counts = new Map<HouseRule, number>();
   for (const file of files.filter((name) => extname(name) === ".tf")) {
     const text = readFileSync(file, "utf8");
     let resources: Resource[];
@@ -93,16 +99,14 @@ export function ruleFindings(files: string[], rules: HouseRule[]): { findings: (
     const found: Finding[] = [];
     for (const rule of rules) {
       for (const resource of resources.filter((item) => item.type === rule.resourceType)) {
-        if ((counts.get(rule) ?? 0) >= MAX_PER_RULE) break;
         const result = evaluate(rule, resource);
         if (result === "unknown") unknown += 1;
         if (result !== "fail") continue;
-        counts.set(rule, (counts.get(rule) ?? 0) + 1);
         found.push({
           severity: rule.severity,
           title: `House rule: ${sentence(rule)}`,
-          detail: `${resource.id} breaks a rule in ${RULES_FILE}.`,
-          ruleId: HOUSE_RULE_ID,
+          detail: `${resource.id} breaks a rule in ${RULES_FILE} (${ruleId(rule)}).`,
+          ruleId: ruleId(rule),
           resource: resource.id,
           remediation: rule.kind === "forbid_value" ? `Change ${rule.attribute} on ${resource.id}.`
             : rule.kind === "require_tag" ? `Add the ${rule.attribute} tag to ${resource.id}.`
@@ -114,6 +118,11 @@ export function ruleFindings(files: string[], rules: HouseRule[]): { findings: (
     const result = applySuppressions(found, text);
     suppressed += result.suppressed;
     out.push(...result.kept.map((finding) => ({ ...finding, file: relative(".", file) })));
+  }
+  // Suppressions are applied first, so a flood of ignored findings cannot push a real one past the cap.
+  if (out.length > MAX_TOTAL) {
+    warnings.push(`${out.length - MAX_TOTAL} house rule findings beyond the first ${MAX_TOTAL} are not shown`);
+    out.length = MAX_TOTAL;
   }
   if (unknown) warnings.push(`${unknown} house rule check${unknown === 1 ? "" : "s"} skipped: the value is computed at apply time`);
   return { findings: out, suppressed, warnings };
