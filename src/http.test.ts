@@ -10,6 +10,7 @@ let audience = `${url}/mcp`;
 let unavailable = false;
 let expiresAt: number | undefined;
 let osvDown = false;
+let usage: "ok" | "limit" | "down" | "other" = "ok";
 let calls: { url: string; authorization: string | null }[] = [];
 const tokenChecks = () => calls.filter((c) => c.url.endsWith("/api/oauth/mcp-token")).length;
 before(async () => {
@@ -31,6 +32,13 @@ before(async () => {
         },
         { status: unavailable ? 503 : active ? 200 : 401 },
       );
+    if (target.endsWith("/api/mcp/usage")) {
+      if (usage === "down") throw new Error("API unreachable");
+      if (usage === "other") return Response.json({ code: "something_else" }, { status: 429 });
+      if (usage === "limit")
+        return Response.json({ code: "mcp_scan_limit_reached", upgradeMessage: "You've used all 100 MCP scans on your plan this month." }, { status: 429 });
+      return Response.json({ used: 1, limit: 100, enforced: true });
+    }
     if (target.endsWith("/api/bots")) return Response.json({ bots: [] });
     if (target.startsWith("https://api.osv.dev/")) {
       if (osvDown) return new Response("down", { status: 503 });
@@ -407,4 +415,42 @@ test("scan_dependencies reports CVEs from a pasted lockfile and never a clean re
   } finally {
     osvDown = false;
   }
+});
+
+const usageCalls = () => calls.filter((c) => c.url.endsWith("/api/mcp/usage"));
+const scanCall = () => call("tools/call", { name: "scan_iac", arguments: { content: 'resource "aws_db_instance" "a" {\n  publicly_accessible = true\n}\n', format: "terraform" } });
+
+test("each tools/call is counted once and the other methods are free", async () => {
+  usage = "ok";
+  calls = [];
+  await call("initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "test", version: "1" } });
+  await call("tools/list", {});
+  assert.equal(usageCalls().length, 0);
+  const response = await scanCall();
+  assert.equal(response.status, 200);
+  assert.equal(usageCalls().length, 1);
+  assert.equal(usageCalls()[0].authorization, "Bearer remote-test");
+});
+
+test("a call over the monthly allowance returns a tool error with the upgrade text and does not run", async () => {
+  usage = "limit";
+  const response = await scanCall();
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.id, 1);
+  assert.equal(body.result.isError, true);
+  const error = JSON.parse(body.result.content[0].text);
+  assert.equal(error.error, "mcp_scan_limit_reached");
+  assert.match(error.message, /used all 100 MCP scans/);
+  assert.equal(body.result.structuredContent, undefined);
+});
+
+test("an outage or an unrelated answer from the usage endpoint lets the call run", async () => {
+  for (const mode of ["down", "other"] as const) {
+    usage = mode;
+    const body = await (await scanCall()).json();
+    assert.equal(body.result.isError, undefined, mode);
+    assert.equal(JSON.parse(body.result.content[0].text).status, "completed", mode);
+  }
+  usage = "ok";
 });

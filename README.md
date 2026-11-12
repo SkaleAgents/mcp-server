@@ -48,7 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.11.1 scan --cves --fail-on high
+      - run: npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.12.0 scan --cves --fail-on high
 ```
 
 Suppress an intended setting with a comment on the flagged line or the line above: `# skaleagents-ignore DATA001 public asset bucket`.
@@ -63,7 +63,7 @@ Suppress an intended setting with a comment on the flagged line or the line abov
 **Cursor.** Add `.cursor/hooks.json`:
 
 ```json
-{ "version": 1, "hooks": { "stop": [{ "command": "npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.11.1 scan --hook" }] } }
+{ "version": 1, "hooks": { "stop": [{ "command": "npx -y --registry=https://registry.npmjs.org @skaleagents/swarm@0.12.0 scan --hook" }] } }
 ```
 
 **GitHub Action.** It posts one PR comment and fails on `critical` by default:
@@ -77,7 +77,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - uses: SkaleAgents/mcp-server@v0.11.1
+      - uses: SkaleAgents/mcp-server@v0.12.0
         with: { fail-on: high }
 ```
 
@@ -173,6 +173,11 @@ YAML aliases must be expanded before submission. Coverage limits are included
 in every result. An empty finding list is not proof that a system is secure.
 
 ## Hosted transport
+
+Each hosted `tools/call` is counted against the account's monthly scan allowance through the API's
+`POST /api/mcp/usage`, before the tool runs. Only the API's `mcp_scan_limit_reached` answer blocks a call,
+as a tool error with the upgrade text. An outage or timeout (3 seconds) lets the call run. Initialize and
+`tools/list` are not counted. The CLI and the stdio package run offline and are not metered.
 
 The web app hosts `https://skaleagents.com/mcp` using `handleMcpRequest` from
 `@skaleagents/swarm/http`. Audit workers import `scanIac` from
