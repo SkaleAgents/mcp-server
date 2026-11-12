@@ -75,6 +75,51 @@ function workerPool(): WorkerPool | null {
   return pool;
 }
 
+type ScanRefusal = { message: string };
+
+/** Hosted tools/call messages in one POST body. Initialize, tools/list and notifications are free. */
+export function toolCallCount(body: unknown): number {
+  return (Array.isArray(body) ? body : [body]).filter(
+    (message) =>
+      typeof message === "object" && message !== null && (message as { method?: unknown }).method === "tools/call",
+  ).length;
+}
+
+/**
+ * Counts hosted tool calls against the account's monthly allowance. Only the API's explicit
+ * mcp_scan_limit_reached refusal blocks a call. An outage, a timeout or any other answer lets it run,
+ * so a failed lookup never locks a user out.
+ */
+async function reserveScans(authorization: string, count: number): Promise<ScanRefusal | null> {
+  try {
+    const response = await fetch(`${getApiUrl()}/api/mcp/usage`, {
+      method: "POST",
+      headers: { Authorization: authorization, Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ count }),
+      signal: AbortSignal.timeout(3_000),
+      redirect: "error",
+      cache: "no-store",
+    });
+    if (response.status !== 429) return null;
+    const refusal = (await response.json()) as { code?: unknown; upgradeMessage?: unknown };
+    if (refusal.code !== "mcp_scan_limit_reached") return null;
+    return { message: typeof refusal.upgradeMessage === "string" ? refusal.upgradeMessage : "You have used all MCP scans on your plan this month." };
+  } catch {
+    return null;
+  }
+}
+
+function scanLimitReply(body: unknown, refusal: ScanRefusal) {
+  const error = { error: "mcp_scan_limit_reached", message: refusal.message };
+  // A single call gets a normal tool error, so the assistant can show the upgrade text. Batches are refused whole.
+  if (Array.isArray(body)) return json(429, error);
+  return json(200, {
+    jsonrpc: "2.0",
+    id: (body as { id?: unknown }).id ?? null,
+    result: { isError: true, content: [{ type: "text", text: JSON.stringify(error) }] },
+  });
+}
+
 export async function handleMcpRequest(request: Request): Promise<Response> {
   const origin = request.headers.get("origin");
   if (origin && !allowedOrigins.has(origin))
@@ -167,6 +212,11 @@ export async function handleMcpRequest(request: Request): Promise<Response> {
     return json(429, { error: "too_many_concurrent_requests" }, { "Retry-After": "5" });
   tokensInFlight.set(tokenKey, inFlight + 1);
   try {
+    const scans = toolCallCount(body);
+    if (scans > 0) {
+      const refusal = await reserveScans(authorization, scans);
+      if (refusal) return scanLimitReply(body, refusal);
+    }
     const job = {
       authorization,
       url: request.url,
