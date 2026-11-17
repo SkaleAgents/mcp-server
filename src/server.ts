@@ -273,7 +273,9 @@ export function createServer(remote = false) {
           source: "osv.dev",
           filename,
           packagesChecked: packages.length,
-          summary: `Checked ${packages.length} packages; ${visible.length} known CVEs match the selected filters.`,
+          summary: packages.length === 0
+            ? `No packages could be checked in ${filename}. This is not a clean result: only exact versions resolved from the public registry are checked, so a package-lock.json needs "resolved" URLs and requirements.txt needs == pins.`
+            : `Checked ${packages.length} packages; ${visible.length} known CVEs match the selected filters.`,
           findings: visible.slice(0, maxFindings),
           totals: summarize(visible),
           totalFindings: visible.length,

@@ -405,6 +405,9 @@ test("scan_dependencies reports CVEs from a pasted lockfile and never a clean re
   assert.equal(ok.structuredContent.packagesChecked, 2);
   assert.deepEqual(ok.structuredContent.findings.map((f: { title: string }) => f.title), ["CVE-2021-23337 in lodash@4.17.20"]);
   assert.ok(!JSON.stringify(ok).includes("corp.example"));
+  const empty = await run({ content: JSON.stringify({ packages: { "node_modules/lodash": { version: "4.17.20" } } }), filename: "package-lock.json" });
+  assert.equal(empty.structuredContent.packagesChecked, 0);
+  assert.match(empty.structuredContent.summary, /not a clean result/);
   assert.equal((await run({ content: "{nope", filename: "package-lock.json" })).isError, true);
   assert.equal((await run({ content: lock, filename: "Gemfile.lock" })).isError ?? true, true);
   osvDown = true;
