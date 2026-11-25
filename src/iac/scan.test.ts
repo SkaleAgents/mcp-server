@@ -4,6 +4,7 @@ import { scanIac } from "./scan.js";
 import {
   looksLikeDockerfile,
   looksLikeGithubWorkflow,
+  looksLikeBicep,
   looksLikeIac,
   ScanInputError,
 } from "./parse.js";
@@ -2597,5 +2598,20 @@ spec:
     assert.equal(ids(deployment("https://api.example.com/v1")).includes("K8S014"), false);
     // The credential may come after other text, and the value may be long.
     assert.ok(ids(deployment(`${"x".repeat(5000)} postgres://admin:password123@db/app`)).includes("K8S014"));
+  });
+});
+
+describe("block comment masking", () => {
+  const bicep = "resource s 'Microsoft.Storage/storageAccounts@2023-01-01' = {}";
+
+  it("masks block comments across lines and keeps code after them", () => {
+    assert.equal(looksLikeBicep(`/* ${bicep}\n${bicep} */`), false);
+    assert.equal(looksLikeBicep(`/* note\nmore */\n${bicep}`), true);
+  });
+
+  it("handles many unclosed block comment openers in linear time", () => {
+    const started = performance.now();
+    assert.equal(looksLikeBicep("/* ".repeat(170000)), false);
+    assert.ok(performance.now() - started < 500, "unclosed /* input must not be quadratic");
   });
 });

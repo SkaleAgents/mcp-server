@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, readdirSync, readFileSync, type Stats, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync, type Stats, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { scanIac, severityRank } from "./iac/scan.js";
 import { collectPackages, lookupCves } from "./cves.js";
@@ -29,6 +29,7 @@ const candidate = /\.(tf|tfvars|hcl|ya?ml|json|bicep)$|(^|[/\\])(Dockerfile|Cont
 const skippedDirs = new Set([".git", "node_modules", "vendor", "dist", "build", ".terraform", ".next"]);
 const skippedFiles = /(^|[/\\])(package-lock\.json|tsconfig[^/\\]*\.json|composer\.lock|pnpm-lock\.yaml|yarn\.lock)$/;
 const maxFiles = 20000;
+const maxFileBytes = 2 * 1024 * 1024;
 const severities = Object.keys(severityRank) as FindingSeverity[];
 
 export type FileFinding = Finding & { file: string };
@@ -92,10 +93,18 @@ export function changedFiles(): string[] {
 // Files in one directory scan together so Terraform variables and locals resolve across them.
 export function scanFiles(files: string[], minSeverity: FindingSeverity = "low") {
   const groups = new Map<string, string[]>();
-  for (const file of files) groups.set(dirname(file), [...(groups.get(dirname(file)) ?? []), file]);
   const findings: FileFinding[] = [];
   const warnings: string[] = [];
   const unchecked: string[] = []; // Inputs the scanner could not read, so a gate must not treat them as clean.
+  for (const file of files) {
+    if (statSync(file).size > maxFileBytes) {
+      const warning = `${file}: skipped, larger than ${maxFileBytes / 1024 / 1024} MB`;
+      warnings.push(warning);
+      unchecked.push(warning); // A file we skipped is not a clean file, so a --fail-on gate must not pass on it.
+      continue;
+    }
+    groups.set(dirname(file), [...(groups.get(dirname(file)) ?? []), file]);
+  }
   let suppressed = 0;
   for (const [dir, group] of groups) {
     if (group.every((file) => !readFileSync(file, "utf8").trim())) continue; // Nothing to check is not a failure.
